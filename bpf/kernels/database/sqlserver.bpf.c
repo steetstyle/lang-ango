@@ -86,7 +86,7 @@ int BPF_PROG(tcp_sendmsg_tds, struct sock *sk, struct msghdr *msg, size_t size) 
     event->tid = tid;
     event->timestamp_ns = ts;
     event->direction = DIR_OUTGOING;
-    event->protocol = PROTO_MYSQL;
+    event->protocol = PROTO_MSSQL;
     event->event_type = EVENT_DB_QUERY;
     event->saddr = saddr;
     event->daddr = daddr;
@@ -143,7 +143,7 @@ int BPF_PROG(tcp_recvmsg_tds, struct sock *sk, struct msghdr *msg,
         event->pid = pid;
         event->timestamp_ns = ts;
         event->direction = DIR_INCOMING;
-        event->protocol = PROTO_MYSQL;
+        event->protocol = PROTO_MSSQL;
         event->event_type = EVENT_DB_RESPONSE;
         event->duration_ns = duration;
         event->saddr = daddr;

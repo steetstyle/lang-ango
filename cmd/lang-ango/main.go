@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/yourorg/lang-ango/pkg/agent/config"
@@ -34,6 +35,11 @@ func init() {
 func main() {
 	flag.Parse()
 
+	// Fall back to LANG_ANGO_CONFIG env var when -config flag is not provided.
+	if configFile == "" {
+		configFile = os.Getenv("LANG_ANGO_CONFIG")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -41,6 +47,16 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
+	}
+
+	// OTEL_EXPORTER_OTLP_ENDPOINT overrides the config file value.
+	// The standard env var uses a full URL (e.g. http://host:4317) but
+	// otlptracegrpc expects host:port, so strip the scheme.
+	if ep := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); ep != "" {
+		ep = strings.TrimPrefix(ep, "https://")
+		ep = strings.TrimPrefix(ep, "http://")
+		cfg.OTel.Endpoint = ep
+		cfg.OTel.Insecure = true
 	}
 
 	if Version != "" {
@@ -116,6 +132,7 @@ func setupEBPF(loader *ebpf.Loader, bpfDir string, proc *processor.Processor) er
 		"ssltrace",
 		"tracepoint",
 		"dotnet",
+		"postgres",
 		"sqlserver",
 		"golang",
 		"python",

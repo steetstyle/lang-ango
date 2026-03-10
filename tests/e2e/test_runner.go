@@ -15,6 +15,7 @@ type E2ETestConfig struct {
 	AgentEndpoint    string
 	OTLPEndpoint     string
 	AppEndpoint      string
+	JaegerEndpoint   string
 	PostgresEndpoint string
 	Timeout          time.Duration
 }
@@ -120,6 +121,9 @@ func (tr *TestRunner) RunGoldenScenario(scenario GoldenScenario) (*TestResult, e
 
 	startTime := time.Now()
 
+	fmt.Printf("\n=== Scenario: %s ===\n", scenario.Name)
+	fmt.Printf("  --> %s %s%s\n", scenario.HTTPRequest.Method, tr.config.AppEndpoint, scenario.HTTPRequest.Path)
+
 	ctx, cancel := context.WithTimeout(context.Background(), tr.config.Timeout)
 	defer cancel()
 
@@ -142,12 +146,14 @@ func (tr *TestRunner) RunGoldenScenario(scenario GoldenScenario) (*TestResult, e
 	}
 	defer resp.Body.Close()
 	result.HTTPStatusCode = resp.StatusCode
+	fmt.Printf("  <-- HTTP %d (expected %d)\n", resp.StatusCode, scenario.ExpectedTrace.HTTPStatusCode)
 
+	fmt.Printf("  ... waiting 500ms for spans to flush ...\n")
 	time.Sleep(500 * time.Millisecond)
 
-	otlpData, err := tr.fetchOTLPTraces()
+	otlpData, err := tr.fetchSpans()
 	if err != nil {
-		// otel-collector does not expose a query API; trace-based validations are skipped
+		fmt.Printf("  [spans] fetch error: %v — skipping span validation\n", err)
 		otlpData = &OTLPExport{}
 	}
 
@@ -156,12 +162,20 @@ func (tr *TestRunner) RunGoldenScenario(scenario GoldenScenario) (*TestResult, e
 			result.Spans = append(result.Spans, ss.Spans...)
 		}
 	}
+	fmt.Printf("  [spans] collected %d span(s) from Jaeger\n", len(result.Spans))
+	for _, s := range result.Spans {
+		fmt.Printf("    - %q  attrs=%v\n", s.Name, s.Attributes)
+	}
 
 	for _, validation := range scenario.Validation {
-		if !tr.validate(validation, result.Spans, scenario.ExpectedTrace) {
+		ok := tr.validate(validation, result.Spans, scenario.ExpectedTrace)
+		status := "PASS"
+		if !ok {
+			status = "FAIL"
 			result.Errors = append(result.Errors,
 				fmt.Sprintf("Validation failed: %s %s %v", validation.Type, validation.Field, validation.Value))
 		}
+		fmt.Printf("  [check] %s  type=%s field=%s value=%v\n", status, validation.Type, validation.Field, validation.Value)
 	}
 
 	result.Duration = time.Since(startTime)
@@ -183,6 +197,133 @@ func (tr *TestRunner) fetchOTLPTraces() (*OTLPExport, error) {
 	}
 
 	return &otlp, nil
+}
+
+// jaegerResponse is the subset of Jaeger's /api/traces response we care about.
+type jaegerResponse struct {
+	Data []struct {
+		Spans []struct {
+			SpanID        string `json:"spanID"`
+			References    []struct{ SpanID string `json:"spanID"` } `json:"references"`
+			OperationName string `json:"operationName"`
+			Tags          []struct {
+				Key   string      `json:"key"`
+				Type  string      `json:"type"`
+				Value interface{} `json:"value"`
+			} `json:"tags"`
+			Duration int64 `json:"duration"`
+		} `json:"spans"`
+	} `json:"data"`
+}
+
+// SpanMatcher is a predicate applied to a single span.
+type SpanMatcher func(Span) bool
+
+// MatchAttr returns a SpanMatcher that passes when the span has an attribute
+// whose key equals key and whose value contains substr.
+func MatchAttr(key, substr string) SpanMatcher {
+	return func(s Span) bool {
+		v, ok := s.Attributes[key]
+		return ok && strings.Contains(v, substr)
+	}
+}
+
+// MatchName returns a SpanMatcher that passes when span.Name equals name.
+func MatchName(name string) SpanMatcher {
+	return func(s Span) bool { return s.Name == name }
+}
+
+// WaitForSpan polls Jaeger every 500 ms until a span matching all matchers is
+// found, or the deadline is reached. It returns the first matching span.
+func (tr *TestRunner) WaitForSpan(timeout time.Duration, matchers ...SpanMatcher) (*Span, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		export, err := tr.fetchSpans()
+		if err == nil {
+			for _, rs := range export.ResourceSpans {
+				for _, ss := range rs.ScopeSpans {
+					for i := range ss.Spans {
+						span := ss.Spans[i]
+						match := true
+						for _, m := range matchers {
+							if !m(span) {
+								match = false
+								break
+							}
+						}
+						if match {
+							return &span, nil
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("no matching span found within %s", timeout)
+}
+
+// DoRequest fires a single HTTP request and returns the status code.
+func (tr *TestRunner) DoRequest(method, path string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tr.config.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, tr.config.AppEndpoint+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := tr.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// fetchSpans queries Jaeger when a JaegerEndpoint is configured, otherwise
+// falls back to the OTLP collector HTTP endpoint.
+func (tr *TestRunner) fetchSpans() (*OTLPExport, error) {
+	if tr.config.JaegerEndpoint == "" {
+		return tr.fetchOTLPTraces()
+	}
+
+	url := tr.config.JaegerEndpoint + "/api/traces?service=lang-ango&limit=200"
+	resp, err := tr.httpClient.Get(url)
+	if err != nil {
+		return tr.fetchOTLPTraces()
+	}
+	defer resp.Body.Close()
+
+	var jr jaegerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&jr); err != nil {
+		return tr.fetchOTLPTraces()
+	}
+
+	// Convert Jaeger format → OTLPExport so the rest of the runner can stay unchanged.
+	var spans []Span
+	for _, trace := range jr.Data {
+		for _, s := range trace.Spans {
+			parentID := ""
+			if len(s.References) > 0 {
+				parentID = s.References[0].SpanID
+			}
+			attrs := make(map[string]string)
+			for _, tag := range s.Tags {
+				attrs[tag.Key] = fmt.Sprintf("%v", tag.Value)
+			}
+			spans = append(spans, Span{
+				SpanID:     s.SpanID,
+				ParentID:   parentID,
+				Name:       s.OperationName,
+				Attributes: attrs,
+			})
+		}
+	}
+
+	return &OTLPExport{
+		ResourceSpans: []ResourceSpan{
+			{ScopeSpans: []ScopeSpan{{Spans: spans}}},
+		},
+	}, nil
 }
 
 func (tr *TestRunner) validate(val Validation, spans []Span, expected ExpectedTrace) bool {
@@ -330,11 +471,16 @@ func newRunner() *TestRunner {
 	if otelEndpoint == "" {
 		otelEndpoint = "http://localhost:4318"
 	}
+	jaegerEndpoint := os.Getenv("JAEGER_ENDPOINT")
+	if jaegerEndpoint == "" {
+		jaegerEndpoint = "http://localhost:16686"
+	}
 	return NewTestRunner(&E2ETestConfig{
-		AgentEndpoint: "http://localhost:4317",
-		OTLPEndpoint:  otelEndpoint,
-		AppEndpoint:   appEndpoint,
-		Timeout:       30 * time.Second,
+		AgentEndpoint:  "http://localhost:4317",
+		OTLPEndpoint:   otelEndpoint,
+		AppEndpoint:    appEndpoint,
+		JaegerEndpoint: jaegerEndpoint,
+		Timeout:        30 * time.Second,
 	})
 }
 
@@ -350,7 +496,7 @@ func runScenario(runner *TestRunner, scenario GoldenScenario) error {
 	if !result.Passed {
 		return fmt.Errorf("test failed: %v", result.Errors)
 	}
-	fmt.Printf("Test passed: %s (%.2fms)\n", result.Name, float64(result.Duration.Milliseconds()))
+	fmt.Printf("=== PASS: %s (%.2fms) ===\n", result.Name, float64(result.Duration.Milliseconds()))
 	return nil
 }
 

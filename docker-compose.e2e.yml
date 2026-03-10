@@ -15,6 +15,14 @@ services:
       timeout: 3s
       retries: 10
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI + query API
+      - "4319:4317"   # OTLP gRPC (host-side, avoids collision with otel-collector)
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.108.0
     command: ["--config=/etc/otel-collector-config.yaml"]
@@ -23,6 +31,8 @@ services:
     ports:
       - "4317:4317" # gRPC
       - "4318:4318" # HTTP
+    depends_on:
+      - jaeger
 
   lang-ango-agent:
     build:
@@ -58,10 +68,12 @@ services:
     environment:
       OTLP_ENDPOINT: http://otel-collector:4318
       APP_ENDPOINT: http://autoapi:8080
+      JAEGER_ENDPOINT: http://jaeger:16686
     depends_on:
       - autoapi
       - lang-ango-agent
       - otel-collector
+      - jaeger
     command: >
       sh -c "
         go test -v -tags=integration ./tests/e2e

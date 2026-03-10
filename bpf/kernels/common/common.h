@@ -63,6 +63,7 @@ struct task_struct {
 #define PROTO_KAFKA     7
 #define PROTO_MONGODB   8
 #define PROTO_TLS       9
+#define PROTO_MSSQL     10
 
 /*
  * Connection Direction

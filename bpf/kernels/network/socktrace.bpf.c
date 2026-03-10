@@ -79,11 +79,6 @@ int BPF_PROG(tcp_sendmsg_entry, struct sock *sk, struct msghdr *msg,
     __u32 tid = bpf_get_current_pid_tgid();
     __u64 ts = bpf_ktime_get_ns();
 
-    void *msg_name = NULL;
-    bpf_probe_read_kernel(&msg_name, sizeof(msg_name), &msg->msg_name);
-    if (!msg_name)
-        return 0;
-
     char buf[64];
     __builtin_memset(buf, 0, sizeof(buf));
     if (read_iov_data(msg, buf, sizeof(buf)) < 0)
