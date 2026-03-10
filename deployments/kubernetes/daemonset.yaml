@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lang-ango
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lang-ango-config
+  namespace: lang-ango
+data:
+  config.yaml: |
+    service:
+      name: lang-ango
+      version: "0.1.0"
+      environment: production
+    
+    discovery:
+      interval: 10s
+    
+    otel:
+      endpoint: "otel-collector:4317"
+      insecure: true
+    
+    prometheus:
+      enabled: true
+      port: 9400
+    
+    kubernetes:
+      enabled: true
+      resync_period: 30s
+    
+    eBPF:
+      buffer_size: 4096
+      perf_buffer_size: 8192
+      max_flows: 65536
+    
+    protocols:
+      http: true
+      grpc: true
+      postgres: true
+      mysql: true
+      redis: true
+      kafka: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lang-ango
+  namespace: lang-ango
+  labels:
+    app: lang-ango
+spec:
+  selector:
+    matchLabels:
+      app: lang-ango
+  template:
+    metadata:
+      labels:
+        app: lang-ango
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: lang-ango
+        image: lang-ango:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - SYS_ADMIN
+            - NET_RAW
+            - SYS_PTRACE
+            - PERFMON
+            - BPF
+            - CHECKPOINT_RESTORE
+        env:
+        - name: LANG_ANGO_CONFIG
+          value: /etc/lang-ango/config.yaml
+        volumeMounts:
+        - name: config
+          mountPath: /etc/lang-ango
+        - name: debugfs
+          mountPath: /sys/kernel/debug
+        - name: btf
+          mountPath: /sys/kernel/btf
+          readOnly: true
+        ports:
+        - containerPort: 9400
+          name: metrics
+        - containerPort: 4317
+          name: otel-grpc
+        - containerPort: 4318
+          name: otel-http
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: config
+        configMap:
+          name: lang-ango-config
+      - name: debugfs
+        hostPath:
+          path: /sys/kernel/debug
+      - name: btf
+        hostPath:
+          path: /sys/kernel/btf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lang-ango
+  namespace: lang-ango
+spec:
+  selector:
+    app: lang-ango
+  ports:
+  - name: metrics
+    port: 9400
+    targetPort: 9400
+  - name: otel-grpc
+    port: 4317
+    targetPort: 4317
+  - name: otel-http
+    port: 4318
+    targetPort: 4318

@@ -1,0 +1,67 @@
+# Lang-Ango Configuration
+# Example configuration file
+
+service:
+  name: lang-ango
+  version: "0.1.0"
+  environment: development
+
+discovery:
+  # PID to instrument (0 = all)
+  pid: 0
+  # Specific ports to monitor (empty = all)
+  ports: [80, 443, 8080, 3000, 50051]
+  # Process names to discover
+  names: []
+  # Discovery interval
+  interval: 10s
+
+# OpenTelemetry configuration
+otel:
+  # OTLP endpoint (gRPC)
+  endpoint: "localhost:4317"
+  # Use insecure connection
+  insecure: true
+
+# Prometheus metrics
+prometheus:
+  enabled: true
+  port: 9400
+
+# Kubernetes enrichment
+kubernetes:
+  enabled: false
+  resync_period: 30s
+
+# eBPF configuration
+ebpf:
+  # eBPF objects directory
+  bpf_dir: "./bpf/bin"
+  # Ring buffer size
+  buffer_size: 4096
+  # Perf buffer size  
+  perf_buffer_size: 8192
+  # Maximum number of flows to track
+  max_flows: 65536
+
+# Sampling configuration
+sampling:
+  traces:
+    # Always sample first request
+    initial: 1.0
+    # Probabilistic sampling rate
+    probability: 0.01
+    # Rate limit per second
+    rate_limit: 100
+  profiles:
+    # CPU profiling frequency (Hz)
+    cpu_hz: 19
+
+# Protocol filters
+protocols:
+  http: true
+  grpc: true
+  postgres: true
+  mysql: true
+  redis: true
+  kafka: false
