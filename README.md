@@ -134,6 +134,8 @@ otomatik olarak doğrulamaktır.
 
 Bu ortam, CI/CD boru hatlarına (pipeline) entegre edilerek geriye dönük uyumluluk (regresyon), görünürlük derinliği ve ajan performans etkisinin sürekli olarak test edilmesini sağlar.
 
+**Not:** eBPF ile tam E2E (agent'ın HTTP/DB trafiğini görmesi) için agent ve e2e-tests `network_mode: host` ile çalışır; bu yapı **Linux** üzerinde anlamlıdır. İstek/DB span üretiminin doğruluğu, eBPF’e bağlı olmadan `go test ./tests/pkg/processor/...` ile kanıtlanır.
+
 ### Kubernetes
 
 ```bash

@@ -130,6 +130,53 @@ func TestAgentCollectsMultipleDBSpans(t *testing.T) {
 	}
 }
 
+// TestAgentCollectsMethodEntrySpan fires GET /api/auto/health and verifies the
+// agent emitted at least one "method" span representing a normal method entry
+// (no exception path), proving that MethodEvent-based tracing is active.
+func TestAgentCollectsMethodEntrySpan(t *testing.T) {
+	checkDeps(t)
+	runner := newRunner()
+
+	status, err := runner.DoRequest(http.MethodGet, "/api/auto/health")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("expected HTTP 200, got %d", status)
+	}
+
+	span, err := runner.WaitForSpan(spanTimeout,
+		MatchName("method"),
+		MatchAttr("dotnet.event", "method_entry"),
+	)
+	if err != nil {
+		t.Fatalf("agent did not emit method_entry span: %v", err)
+	}
+	t.Logf("method_entry span found: attrs=%v", span.Attributes)
+}
+
+// TestAgentCollectsCPUProfileSpan waits for a "cpu_profile" span with
+// profiler.type=cpu, demonstrating that CPUProfileEvent sampling is wired
+// through eBPF ring buffers into Jaeger in the Docker e2e environment.
+func TestAgentCollectsCPUProfileSpan(t *testing.T) {
+	checkDeps(t)
+	runner := newRunner()
+
+	// Trigger some activity in the app to give the profiler work to sample.
+	if _, err := runner.DoRequest(http.MethodGet, "/api/auto/health"); err != nil {
+		t.Fatalf("warmup request failed: %v", err)
+	}
+
+	span, err := runner.WaitForSpan(spanTimeout,
+		MatchName("cpu_profile"),
+		MatchAttr("profiler.type", "cpu"),
+	)
+	if err != nil {
+		t.Fatalf("agent did not emit cpu_profile span: %v", err)
+	}
+	t.Logf("cpu_profile span found: attrs=%v", span.Attributes)
+}
+
 // TestAgentSimultaneous fires both endpoints at the same time and verifies
 // that both an exception span and a healthy http span are collected.
 func TestAgentSimultaneous(t *testing.T) {

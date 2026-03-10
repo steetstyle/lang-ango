@@ -145,6 +145,7 @@ type spanContext struct {
 	startTime time.Time
 	httpEvent *HTTPEvent
 	dbEvent   *DBEvent
+	span      trace.Span // HTTP server span; ended on response
 }
 
 type SpanKey struct {
@@ -206,22 +207,41 @@ func (p *Processor) HandleHTTP(data []byte) error {
 
 	if event.EventType == EventHTTPRequest {
 		key := SpanKey{PID: event.PID, TID: event.TID, Port: event.DPort, Dir: event.Direction}
+		_, span := p.exporter.StartSpan("http")
+		for _, a := range attrs {
+			span.SetAttributes(a)
+		}
 		p.spans[key] = &spanContext{
 			traceID:   p.generateTraceID(),
-			spanID:    p.generateSpanID(),
+			spanID:    span.SpanContext().SpanID(),
 			startTime: time.Now(),
 			httpEvent: &event,
+			span:      span,
 		}
-	} else if event.EventType == EventHTTPResponse {
-		key := SpanKey{PID: event.PID, TID: event.TID, Port: event.Sport, Dir: event.Direction}
+		return nil
+	}
+	if event.EventType == EventHTTPResponse {
+		// Match response to request: server request is Incoming (to port), response is Outgoing (from port).
+		serverPort := event.Sport
+		key := SpanKey{PID: event.PID, TID: event.TID, Port: serverPort, Dir: DirIncoming}
+		if _, ok := p.spans[key]; !ok {
+			key = SpanKey{PID: event.PID, TID: event.TID, Port: serverPort, Dir: event.Direction}
+		}
 		if ctx, ok := p.spans[key]; ok {
 			duration := time.Duration(event.TimestampNS - ctx.httpEvent.TimestampNS)
-			attrs = append(attrs, attribute.Int64("duration.ns", int64(duration)))
-
+			// Only set response-specific attributes so we don't overwrite request attrs (e.g. http.method).
+			ctx.span.SetAttributes(
+				attribute.Int64("duration.ns", int64(duration)),
+				attribute.String("server.address", p.formatIP(event.SAddr)),
+				attribute.Int("http.response.status_code", int(event.Status)),
+			)
+			ctx.span.End()
 			delete(p.spans, key)
 		}
+		return nil
 	}
 
+	// Fallback: emit a single event span if we see only one side (e.g. outgoing only)
 	p.exporter.AddEvent("http", attrs)
 	return nil
 }

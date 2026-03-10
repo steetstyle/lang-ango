@@ -84,7 +84,10 @@ func (e *Exporter) Shutdown(ctx context.Context) error {
 	if err := e.traceProvider.Shutdown(ctx); err != nil {
 		return err
 	}
-	return e.meterProvider.Shutdown(ctx)
+	if e.meterProvider != nil {
+		return e.meterProvider.Shutdown(ctx)
+	}
+	return nil
 }
 
 func (e *Exporter) Close() error {
@@ -104,4 +107,10 @@ func (e *Exporter) AddEvent(name string, attrs []attribute.KeyValue) {
 func (e *Exporter) StartSpan(name string) (context.Context, trace.Span) {
 	tracer := e.traceProvider.Tracer("lang-ango")
 	return tracer.Start(context.Background(), name)
+}
+
+// NewExporterWithTracerProvider is for testing: it uses the given TracerProvider
+// so tests can attach a recording SpanProcessor and assert on exported spans.
+func NewExporterWithTracerProvider(tp *sdktrace.TracerProvider) *Exporter {
+	return &Exporter{traceProvider: tp, config: &Config{}}
 }
