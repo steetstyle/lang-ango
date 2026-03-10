@@ -52,7 +52,7 @@ services:
 
   autoapi:
     build:
-      context: ./dotnet/AutoApi.E2ETestApp
+      context: ./tests/dotnet/AutoApi.E2ETestApp
     environment:
       ConnectionStrings__Default: Host=postgres;Port=5432;Username=postgres;Password=postgres;Database=autoapi
     ports:
