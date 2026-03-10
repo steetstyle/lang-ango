@@ -3,8 +3,9 @@
 package e2e
 
 import (
-	"os"
 	"net"
+	"net/url"
+	"os"
 	"testing"
 	"time"
 )
@@ -25,7 +26,11 @@ func TestAutoAPIIntegration(t *testing.T) {
 	deps := []string{appEndpoint, otelEndpoint}
 
 	for _, addr := range deps {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		tcpAddr := addr
+		if u, err := url.Parse(addr); err == nil && u.Host != "" {
+			tcpAddr = u.Host
+		}
+		conn, err := net.DialTimeout("tcp", tcpAddr, 2*time.Second)
 		if err != nil {
 			t.Skipf("Skipping E2E test; dependency %s not reachable: %v", addr, err)
 		}

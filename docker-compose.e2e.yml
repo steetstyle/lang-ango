@@ -45,13 +45,13 @@ services:
     environment:
       ConnectionStrings__Default: Host=postgres;Port=5432;Username=postgres;Password=postgres;Database=autoapi
     ports:
-      - "5000:8080"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
 
   e2e-tests:
-    image: golang:1.21
+    image: golang:1.24
     working_dir: /workspace
     volumes:
       - .:/workspace

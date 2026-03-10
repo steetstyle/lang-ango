@@ -42,76 +42,63 @@ struct {
     __uint(max_entries, 256 * 1024);
 } cpu_profile_events SEC(".maps");
 
-static __always_inline int get_stack_depth(void *ctx) {
-    struct perf_sample_data *data;
-    struct pt_regs *regs;
-    
-    bpf_probe_read(&data, sizeof(data), ctx);
-    bpf_probe_read(&regs, sizeof(regs), &data->regs);
-    
-    if (!regs)
-        return 0;
-        
-    return 0;
-}
-
 SEC("perf_event/sched/sched_process_exec")
 int BPF_PROG(sched_process_exec, struct perf_event_header *hdr) {
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u64 ts = bpf_ktime_get_ns();
-    
+
     struct sample_event *event = bpf_ringbuf_reserve(&cpu_profile_events,
         sizeof(struct sample_event), 0);
     if (!event)
         return 0;
-    
+
     event->pid = pid;
     event->cpu = bpf_get_smp_processor_id();
     event->timestamp_ns = ts;
-    event->event_type = 1;
-    
+    event->stack_id = 0;
+    event->stack_depth = 0;
+
     bpf_ringbuf_submit(event, 0);
     return 0;
 }
 
 SEC("fentry/scheduler_tick")
-int BPF_PROG(scheduler_tick, struct rq *rq, struct task_struct *curr) {
-    __u32 pid = curr->pid;
+int BPF_PROG(scheduler_tick, void *rq, void *curr) {
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u64 ts = bpf_ktime_get_ns();
-    
+
     __u64 *last = bpf_map_lookup_elem(&pid_filter, &pid);
     if (last && (ts - *last) < 10000000)
         return 0;
-    
+
     struct sample_event *event = bpf_ringbuf_reserve(&cpu_profile_events,
         sizeof(struct sample_event), 0);
     if (!event)
         return 0;
-    
+
     event->pid = pid;
     event->cpu = bpf_get_smp_processor_id();
     event->timestamp_ns = ts;
-    
-    __builtin_memset(event->addresses, 0, sizeof(event->addresses));
+    event->stack_id = 0;
     event->stack_depth = 0;
-    
+
     bpf_ringbuf_submit(event, 0);
-    
+
     __u64 val = ts;
     bpf_map_update_elem(&pid_filter, &pid, &val, BPF_ANY);
-    
+
     return 0;
 }
 
 SEC("kprobe/__put_task_struct")
-int BPF_PROG(task_exit, struct task_struct *tsk) {
-    __u32 pid = tsk->pid;
+int BPF_PROG(task_exit, void *tsk) {
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
     bpf_map_delete_elem(&pid_filter, &pid);
     return 0;
 }
 
 SEC("kprobe/finish_task_switch")
-int BPF_PROG(context_switch, struct task_struct *prev) {
+int BPF_PROG(context_switch, void *prev) {
     return 0;
 }
 

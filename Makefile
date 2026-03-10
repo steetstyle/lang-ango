@@ -22,8 +22,8 @@ BPF_BIN_DIR := $(BPF_DIR)/bin
 PKG_DIR := pkg
 
 # eBPF source files
-BPF_SOURCES := $(wildcard $(BPF_DIR)/kernels/**/*.c)
-BPF_OBJECTS := $(BPF_SOURCES:$(BPF_DIR)/kernels/%.c=$(BPF_BIN_DIR)/%.o)
+BPF_SOURCES := $(shell find $(BPF_DIR)/kernels -name '*.bpf.c')
+BPF_OBJECTS := $(foreach src,$(BPF_SOURCES),$(BPF_BIN_DIR)/$(patsubst %.bpf.c,%.o,$(notdir $(src))))
 
 # Default target
 all: help
@@ -53,12 +53,17 @@ build:
 bpf: $(BPF_OBJECTS)
 	@echo "eBPF programs compiled"
 
-$(BPF_BIN_DIR)/%.o: $(BPF_DIR)/kernels/%.c
-	@mkdir -p $(dir $@)
+define BPF_RULE
+$(BPF_BIN_DIR)/$(patsubst %.bpf.c,%.o,$(notdir $(1))): $(1)
+	@mkdir -p $(BPF_BIN_DIR)
 	$(BPF_CLANG) $(BPF_CFLAGS) \
 		-I$(BPF_DIR)/headers \
 		-I$(BPF_DIR)/kernels/common \
-		-c $< -o $@
+		-c $$< -o $$@
+
+endef
+
+$(foreach src,$(BPF_SOURCES),$(eval $(call BPF_RULE,$(src))))
 
 # Clean eBPF artifacts
 clean-bpf:

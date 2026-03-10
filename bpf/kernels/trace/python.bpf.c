@@ -6,6 +6,7 @@
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 
 /*
  * Python exception event

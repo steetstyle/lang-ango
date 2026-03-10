@@ -18,6 +18,24 @@
 #include <net/sock.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_tracing.h>
+#include <linux/uio.h>
+
+/* Minimal task_struct definition for bpf_get_current_task() users */
+struct task_struct {
+    int pid;
+    int tgid;
+    unsigned int flags;
+    char comm[16];
+};
+
+/* Ensure AF_* constants are available for BPF compilation */
+#ifndef AF_INET
+#define AF_INET  2
+#endif
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
 
 /* 
  * Event Types 
