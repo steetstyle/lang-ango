@@ -1,88 +1,138 @@
 # Lang-Ango
 
-eBPF-based Zero-Code OpenTelemetry Auto-Instrumentation Agent
+eBPF tabanlı, kod değişikliği gerektirmeyen (zero‑code) OpenTelemetry otomatik enstrümantasyon ajanı
 
-## Overview
+## Genel Bakış
 
-Lang-Ango is an eBPF-based observability agent that provides automatic instrumentation for distributed applications without requiring code changes. It captures network traffic at the kernel level and produces OpenTelemetry-compatible metrics and traces.
+Lang-Ango, dağıtık uygulamalar için **uygulama koduna dokunmadan** gözlemlenebilirlik sağlayan bir ajandır.  
+Linux çekirdeği üzerinde çalışan eBPF programları ile ağ trafiğini ve veritabanı çağrılarını yakalar, kullanıcı alanındaki Go ajanı ile bu verileri **OpenTelemetry uyumlu metrik ve izlere (trace)** dönüştürür.
 
-## Features
+Hedef:
 
-- **Zero-Code Instrumentation**: No code changes required
-- **Multi-Protocol Support**: HTTP, gRPC, PostgreSQL, MySQL, Redis, Kafka
-- **TLS Interception**: Transparent capture of encrypted traffic
-- **Distributed Tracing**: W3C Trace Context propagation
-- **Kubernetes Integration**: Pod/Service metadata enrichment
-- **OpenTelemetry Export**: OTLP and Prometheus compatibility
-- **Language Agnostic**: Works with any language (Go, Java, Python, Node.js, etc.)
+- Kod içerisine ekstra SDK/agent eklemeden,
+- Farklı dillerde yazılmış servisleri (Go, .NET, Java vb.) ortak bir modelle gözlemleyebilmek,
+- Toplanan veriyi tamamen **açık standartlarla** (OTLP, Prometheus) dış sistemlere (Grafana, Tempo, Jaeger vb.) iletmektir.
 
-## Architecture
+## Özellikler
+
+- **Kod Değişikliği Gerektirmez (Zero‑Code)**: Uygulama koduna agent veya SDK eklemeden çalışır.
+- **Çoklu Protokol Desteği**: HTTP, gRPC, PostgreSQL, MySQL, Redis, Kafka vb.
+- **TLS Trafik Analizi**: Şifreli TLS bağlantıları için kullanıcı alanı kancaları (hook) ile birlikte çalışabilir.
+- **Dağıtık İzleme (Tracing)**: W3C Trace Context (`traceparent`) başlığı ile bağlam yayılımı.
+- **Kubernetes Entegrasyonu**: Pod / Service bilgisini trace ve metriklere etiket olarak ekler.
+- **OpenTelemetry Desteği**: OTLP çıkışı ve Prometheus uyumlu metrikler.
+- **Dil Bağımsız Çekirdek**: Çekirdek katmanı tamamen language‑agnostic; uygulama tarafında ek kütüphane gerektirmez.
+
+## Mimari
+
+Lang-Ango'nun tasarımı, iki ana katmanı birleştiren hibrit bir yaklaşıma dayanır:
+
+- **Kernel Katmanı (eBPF)**: Ağ trafiğini, L7 protokollerini (HTTP, PostgreSQL, TDS/MSSQL vb.), TLS oturumlarını ve soket düzeyindeki ilişkileri yakalar. Bu katman tamamen dilden bağımsızdır.
+- **Kullanıcı Alanı Katmanı (User-Space Agent + Language Hooks)**:
+  - Go ile yazılmış kullanıcı alanı ajanı, eBPF event'lerini okuyup OpenTelemetry span'lerine dönüştürür, Kubernetes metadata'sı ile zenginleştirir ve OTLP üzerinden dışa aktarır.
+  - İsteğe bağlı dil-spesifik hook'lar (ör. .NET profiler) ile sadece ağ trafiğine yansımayan iç metod çağrıları, özel exception tipleri ve detaylı stack trace bilgileri de toplanabilir.
+
+Bu mimarinin temel motivasyonu:
+
+- Uygulama koduna dokunmadan **servis sınırlarının dışından** mümkün olan en zengin bağlamı yakalamak,
+- Ağ ve veritabanı seviyesindeki sinyallerle, uygulama içi davranışı (ör. kritik metodlar, domain spesifik exception'lar) tek bir bütünsel trace modeli içinde birleştirmek,
+- Toplanan veriyi tamamen açık standartlarla (OTLP, Prometheus) dış dünyaya sunmaktır.
+
+Yüksek seviye bileşen görünümü:
 
 ```
 ┌─────────────────────────────────────────────┐
-│           Kubernetes Cluster                 │
+│           Kubernetes / Host                  │
 │  ┌─────────────────────────────────────┐   │
-│  │         Lang-Ango DaemonSet         │   │
+│  │         Lang-Ango Agent            │   │
 │  │  ┌─────────┐  ┌─────────┐          │   │
 │  │  │ eBPF    │  │  User   │          │   │
-│  │  │ Kernel  │◄─┤  Space  │◄──►OTel  │   │
+│  │  │ Kernel  │◄─┤  Space  │◄──► OTLP │   │
 │  │  │ Programs│  │  Agent  │   Export │   │
 │  │  └─────────┘  └─────────┘          │   │
 │  └─────────────────────────────────────┘   │
 └─────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## Hızlı Başlangıç
 
-### Prerequisites
+### Ön Koşullar
 
-- Linux kernel 5.8+ with BTF enabled
+- Linux kernel 5.8+ (BTF etkin)
 - Go 1.21+
 - clang/llvm
-- Root/sudo access (for eBPF)
+- eBPF için root/sudo yetkisi
 
-### Build
+### Derleme
 
 ```bash
-# Install dependencies
+# Bağımlılıkları indir
 make deps
 
-# Build eBPF programs
+# eBPF programlarını derle
 make bpf
 
-# Build agent
+# Ajanı derle
 make build
 
-# Or build everything at once
+# Hepsini bir arada
 make all
 ```
 
-### Run
+### Çalıştırma
 
 ```bash
-# With config file
+# Konfigürasyon dosyası ile
 sudo ./bin/lang-ango -config config.yaml
 
-# With specific port
+# Sadece belirli bir portu dinlemek için
 sudo ./bin/lang-ango -port 8080
 
-# With specific PID
+# Belirli bir PID için
 sudo ./bin/lang-ango -pid 12345
 ```
 
-### Docker
+### Docker ile Çalıştırma
 
 ```bash
-# Build image
+# İmajı oluştur
 make docker
 
-# Run in Docker
+# Docker'da çalıştır
 docker run -d \
   --privileged \
   -v /sys/kernel/debug:/sys/kernel/debug \
   -v /sys/kernel/btf:/sys/kernel/btf:ro \
   lang-ango:latest
 ```
+
+### Uçtan Uca E2E Test Ortamı (İsteğe Bağlı)
+
+Lang-Ango ile gerçek bir .NET/ASP.NET uygulaması, veritabanı ve OpenTelemetry Collector üzerinde davranışı uçtan uca doğrulamak için, proje içinde hazır bir `docker-compose` kurgusu bulunur:
+
+```bash
+docker compose -f docker-compose.e2e.yml up --build e2e-tests
+```
+
+Bu komut:
+
+- Postgres veritabanını (`postgres` servisi),
+- Örnek ASP.NET Core uygulamasını (`autoapi` – `dotnet/AutoApi.E2ETestApp`),
+- OpenTelemetry Collector'ı (`otel-collector`),
+- Lang-Ango ajanını (`lang-ango-agent`),
+- Go ile yazılmış E2E testlerini (`e2e-tests`)
+
+aynı ağ üzerinde ayağa kaldırır.
+
+E2E senaryonun amacı, gerçek bir HTTP isteğinin:
+
+- Uygulama katmanında birden fazla SQL sorgusu ve özel bir exception (ör. `SbmException`) üretmesini,
+- eBPF katmanında bu SQL/HTTP/TLS sinyallerinin yakalanmasını,
+- Kullanıcı alanı ajanında bunların tek bir izleme bağlamında (trace) birleştirilip OTLP üzerinden kolektöre gönderildiğini
+
+otomatik olarak doğrulamaktır.
+
+Bu ortam, CI/CD boru hatlarına (pipeline) entegre edilerek geriye dönük uyumluluk (regresyon), görünürlük derinliği ve ajan performans etkisinin sürekli olarak test edilmesini sağlar.
 
 ### Kubernetes
 
@@ -91,9 +141,9 @@ docker run -d \
 kubectl apply -f deployments/kubernetes/
 ```
 
-## Configuration
+## Konfigürasyon
 
-See `config.yaml` for all available options:
+Tüm seçenekler için `config.yaml` dosyasına bakabilirsiniz. Örnek bir minimum konfigürasyon:
 
 ```yaml
 service:
@@ -113,26 +163,30 @@ prometheus:
   port: 9400
 ```
 
-## Metrics
+## Metrikler
 
-The agent exports the following metrics:
+Ajan, OpenTelemetry uyumlu aşağıdaki temel metrikleri üretir:
 
-- `http.server.duration` - HTTP request duration (histogram)
-- `http.server.request_count` - Total HTTP requests (counter)
-- `http.server.error_count` - HTTP errors (counter)
-- `db.client.duration` - Database call duration (histogram)
+- `http.server.duration` – HTTP istek süreleri (histogram)
+- `http.server.request_count` – Toplam HTTP istek sayısı (counter)
+- `http.server.error_count` – HTTP hata sayısı (counter)
+- `db.client.duration` – Veritabanı çağrı süreleri (histogram)
 
-## Supported Languages
+## Desteklenen Diller
 
-| Language | HTTP | HTTPS/TLS | Database |
-|----------|------|------------|----------|
-| Go       | ✓   | ✓         | ✓        |
-| Java     | ✓   | Limited    | ✓        |
-| Python   | ✓   | ✓         | ✓        |
-| Node.js  | ✓   | ✓         | ✓        |
-| .NET     | ✓   | Limited   | ✓        |
-| Rust     | ✓   | ✓         | ✓        |
+Çekirdek eBPF katmanı dil bağımsızdır; aşağıdaki diller için tipik kullanım senaryoları desteklenir:
 
-## License
+| Dil     | HTTP | HTTPS/TLS | Veritabanı |
+|---------|------|-----------|-----------|
+| Go      | ✓    | ✓         | ✓         |
+| Java    | ✓    | Sınırlı   | ✓         |
+| Python  | ✓    | ✓         | ✓         |
+| Node.js | ✓    | ✓         | ✓         |
+| .NET    | ✓    | Sınırlı   | ✓         |
+| Rust    | ✓    | ✓         | ✓         |
+
+“Sınırlı” ifadesi, ilgili dilde TLS içi görünürlüğün tamamen çekirdekten sağlanamadığı, ek kullanıcı alanı hook’larına veya proxy mimarisine ihtiyaç duyulabileceği anlamına gelir.
+
+## Lisans
 
 Apache License 2.0
