@@ -27,6 +27,14 @@ public class AutoInformationController : ControllerBase
         _httpClient = new HttpClient();
     }
 
+    [HttpGet("health")]
+    public async Task<IActionResult> GetHealth()
+    {
+        // Simple stack-only scenario: one DB call, no exception thrown.
+        await _db.ExecuteAsync("SELECT 1");
+        return Ok(new { status = "healthy" });
+    }
+
     [HttpGet("auto-information")]
     public async Task<IActionResult> GetAutoInformation()
     {

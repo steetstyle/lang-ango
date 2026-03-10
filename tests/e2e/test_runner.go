@@ -321,7 +321,7 @@ func (r *TestResult) GetSpanByName(name string) *Span {
 	return nil
 }
 
-func RunAutoAPIIntegrationTest() error {
+func newRunner() *TestRunner {
 	appEndpoint := os.Getenv("APP_ENDPOINT")
 	if appEndpoint == "" {
 		appEndpoint = "http://localhost:5000"
@@ -330,16 +330,34 @@ func RunAutoAPIIntegrationTest() error {
 	if otelEndpoint == "" {
 		otelEndpoint = "http://localhost:4318"
 	}
-
-	runner := NewTestRunner(&E2ETestConfig{
+	return NewTestRunner(&E2ETestConfig{
 		AgentEndpoint: "http://localhost:4317",
 		OTLPEndpoint:  otelEndpoint,
 		AppEndpoint:   appEndpoint,
 		Timeout:       30 * time.Second,
 	})
+}
 
-	scenario := GoldenScenario{
-		Name: "Auto.API with SbmException",
+func runScenario(runner *TestRunner, scenario GoldenScenario) error {
+	result, err := runner.RunGoldenScenario(scenario)
+	if err != nil {
+		return err
+	}
+	if result.HTTPStatusCode != scenario.ExpectedTrace.HTTPStatusCode {
+		return fmt.Errorf("expected HTTP status %d, got %d",
+			scenario.ExpectedTrace.HTTPStatusCode, result.HTTPStatusCode)
+	}
+	if !result.Passed {
+		return fmt.Errorf("test failed: %v", result.Errors)
+	}
+	fmt.Printf("Test passed: %s (%.2fms)\n", result.Name, float64(result.Duration.Milliseconds()))
+	return nil
+}
+
+// RunExceptionScenario tests the endpoint that always throws SbmException (HTTP 500).
+func RunExceptionScenario() error {
+	return runScenario(newRunner(), GoldenScenario{
+		Name: "Exception trace — SbmException on auto-information",
 		HTTPRequest: HTTPRequest{
 			Method: "GET",
 			Path:   "/api/auto/auto-information",
@@ -354,23 +372,39 @@ func RunAutoAPIIntegrationTest() error {
 		Validation: []Validation{
 			{"http_status", "http.status_code", "", 500},
 		},
-	}
+	})
+}
 
-	result, err := runner.RunGoldenScenario(scenario)
-	if err != nil {
-		return err
-	}
+// RunStackOnlyScenario tests the health endpoint which executes a DB query and
+// returns 200 without throwing any exception — stack-only trace, no exception.
+func RunStackOnlyScenario() error {
+	return runScenario(newRunner(), GoldenScenario{
+		Name: "Stack-only trace — healthy endpoint, no exception",
+		HTTPRequest: HTTPRequest{
+			Method: "GET",
+			Path:   "/api/auto/health",
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
+		},
+		ExpectedTrace: ExpectedTrace{
+			RootSpanName:   "HTTP GET /api/auto/health",
+			HTTPStatusCode: 200,
+		},
+		Validation: []Validation{
+			{"http_status", "http.status_code", "", 200},
+		},
+	})
+}
 
-	// Validate HTTP status code directly from the response
-	if result.HTTPStatusCode != scenario.ExpectedTrace.HTTPStatusCode {
-		return fmt.Errorf("expected HTTP status %d, got %d", scenario.ExpectedTrace.HTTPStatusCode, result.HTTPStatusCode)
+// RunAutoAPIIntegrationTest runs both scenarios and is kept for backwards compatibility.
+func RunAutoAPIIntegrationTest() error {
+	if err := RunExceptionScenario(); err != nil {
+		return fmt.Errorf("exception scenario: %w", err)
 	}
-
-	if !result.Passed {
-		return fmt.Errorf("test failed: %v", result.Errors)
+	if err := RunStackOnlyScenario(); err != nil {
+		return fmt.Errorf("stack-only scenario: %w", err)
 	}
-
-	fmt.Printf("Test passed: %s (%.2fms)\n", result.Name, float64(result.Duration.Milliseconds()))
 	return nil
 }
 
