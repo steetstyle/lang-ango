@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
+using Infrastructure.Common.Exceptions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -74,12 +75,13 @@ public class DbClient
     }
 }
 
-namespace Infrastructure.Common.Exceptions;
-
-public class SbmException : Exception
+namespace Infrastructure.Common.Exceptions
 {
-    public SbmException(string message) : base(message)
+    public class SbmException : Exception
     {
+        public SbmException(string message) : base(message)
+        {
+        }
     }
 }
 
