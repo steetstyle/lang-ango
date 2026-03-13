@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -68,10 +69,16 @@ func (l *Loader) LoadBPF(bpfDir, name string) error {
 
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Error creating collection %s: %v\n", name, err)
 		return fmt.Errorf("creating collection %s: %w", name, err)
 	}
 
 	l.objects[name] = coll
+
+	for progName, prog := range coll.Programs {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Program %s/%s type: %v\n", name, progName, prog.Type())
+	}
+
 	return nil
 }
 
@@ -103,6 +110,8 @@ func (l *Loader) StartRingBufHandler(mapName string, handler EventHandler) error
 		return err
 	}
 
+	fmt.Printf("[DEBUG] Starting ringbuf handler for: %s\n", mapName)
+
 	go func() {
 		for {
 			select {
@@ -116,6 +125,7 @@ func (l *Loader) StartRingBufHandler(mapName string, handler EventHandler) error
 					}
 					continue
 				}
+				fmt.Printf("[DEBUG] Received event from %s, size=%d\n", mapName, len(record.RawSample))
 				if err := handler(record.RawSample); err != nil {
 					fmt.Fprintf(os.Stderr, "handler error: %v\n", err)
 				}
@@ -130,5 +140,23 @@ func EnsurePermissions() error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("removing memlock: %w", err)
 	}
+
+	fmt.Printf("[DEBUG] Checking kernel kprobe availability...\n")
+	kprobeEventsPath := "/sys/kernel/debug/tracing/kprobe_events"
+	if _, err := os.Stat(kprobeEventsPath); err != nil {
+		fmt.Printf("[DEBUG] Kprobe events not available: %v\n", err)
+	}
+
+	data, err := os.ReadFile("/sys/kernel/debug/tracing/available_filter_functions")
+	if err == nil {
+		content := string(data)
+		if strings.Contains(content, "tcp_sendmsg") {
+			fmt.Printf("[DEBUG] tcp_sendmsg is available for tracing\n")
+		}
+		if strings.Contains(content, "tcp_recvmsg") {
+			fmt.Printf("[DEBUG] tcp_recvmsg is available for tracing\n")
+		}
+	}
+
 	return nil
 }

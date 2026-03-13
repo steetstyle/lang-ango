@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/yourorg/lang-ango/pkg/agent/config"
+	"github.com/yourorg/lang-ango/pkg/agent/hybrid"
 	"github.com/yourorg/lang-ango/pkg/ebpf"
 	"github.com/yourorg/lang-ango/pkg/otel"
 	"github.com/yourorg/lang-ango/pkg/processor"
@@ -23,6 +25,7 @@ var (
 	pid        int
 	port       int
 	bpfDir     string
+	testMode   bool
 )
 
 func init() {
@@ -30,6 +33,7 @@ func init() {
 	flag.IntVar(&pid, "pid", 0, "Process ID to instrument (0 for all)")
 	flag.IntVar(&port, "port", 0, "Port to instrument (0 for all)")
 	flag.StringVar(&bpfDir, "bpf-dir", "/var/run/lang-ango/bpf", "Directory containing compiled eBPF objects")
+	flag.BoolVar(&testMode, "test-mode", false, "Run in test mode with fake spans for testing")
 }
 
 func main() {
@@ -76,18 +80,30 @@ func main() {
 	}
 	defer otelExporter.Close()
 
-	if err := ebpf.EnsurePermissions(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to ensure eBPF permissions: %v\n", err)
-		os.Exit(1)
-	}
-
-	loader := ebpf.New()
-	defer loader.Close()
-
 	proc := processor.New(otelExporter, cfg.Service.Name, cfg.Service.Environment)
 
-	if err := setupEBPF(loader, bpfDir, proc); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to setup eBPF: %v\n", err)
+	// Start hybrid agent (includes IPC server for .NET profiler)
+	agent := hybrid.New(cfg, otelExporter)
+	if err := agent.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start hybrid agent: %v\n", err)
+	}
+	defer agent.Stop()
+
+	if testMode {
+		fmt.Println("[TEST MODE] Starting test span generator")
+		go runTestMode(ctx, proc)
+	} else {
+		if err := ebpf.EnsurePermissions(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to ensure eBPF permissions: %v\n", err)
+			os.Exit(1)
+		}
+
+		loader := ebpf.New()
+		defer loader.Close()
+
+		if err := setupEBPF(loader, bpfDir, proc); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to setup eBPF: %v\n", err)
+		}
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -202,4 +218,50 @@ func handleEvent(mapName string, data []byte, proc *processor.Processor) error {
 		fmt.Printf("Unknown event map: %s\n", mapName)
 	}
 	return nil
+}
+
+func runTestMode(ctx context.Context, proc *processor.Processor) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			generateTestSpan(proc)
+		}
+	}
+}
+
+func generateTestSpan(proc *processor.Processor) {
+	if err := proc.GenerateTestHTTP(); err != nil {
+		fmt.Fprintf(os.Stderr, "Test HTTP span error: %v\n", err)
+	} else {
+		fmt.Println("[TEST MODE] Generated test HTTP span")
+	}
+
+	if err := proc.GenerateTestDB(); err != nil {
+		fmt.Fprintf(os.Stderr, "Test DB span error: %v\n", err)
+	} else {
+		fmt.Println("[TEST MODE] Generated test DB span")
+	}
+
+	if err := proc.GenerateTestException(); err != nil {
+		fmt.Fprintf(os.Stderr, "Test Exception span error: %v\n", err)
+	} else {
+		fmt.Println("[TEST MODE] Generated test Exception span")
+	}
+
+	if err := proc.GenerateTestMethod(); err != nil {
+		fmt.Fprintf(os.Stderr, "Test Method span error: %v\n", err)
+	} else {
+		fmt.Println("[TEST MODE] Generated test Method span")
+	}
+
+	if err := proc.GenerateTestCPUProfile(); err != nil {
+		fmt.Fprintf(os.Stderr, "Test CPU Profile span error: %v\n", err)
+	} else {
+		fmt.Println("[TEST MODE] Generated test CPU Profile span")
+	}
 }

@@ -4,19 +4,28 @@
  * 
  * This is a C++ shared library that gets injected into .NET processes
  * to capture method entry/exit with full stack traces and timing.
+ * 
+ * Supports Selective Sampling for Dynatrace-level APM:
+ * - Slow request detection (>2s)
+ * - Exception-based sampling
+ * - Thread call stack sampling
  */
 
 #ifndef LANG_ANGO_PROFILER_H
 #define LANG_ANGO_PROFILER_H
 
-#include <corprof.h>
 #include <corhdr.h>
+#include <corprof.h>
 #include <atomic>
 #include <chrono>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
+#include <queue>
+#include <thread>
+#include <condition_variable>
+#include <unordered_map>
 
 #ifdef _WIN32
 #define PROFILER_EXPORT __declspec(dllexport)
@@ -26,6 +35,10 @@
 
 namespace langango {
 namespace dotnet {
+
+// ============================================================================
+// Data Structures for Selective Sampling
+// ============================================================================
 
 struct MethodInfo {
     std::wstring className;
@@ -53,6 +66,90 @@ struct ExceptionEvent {
     std::wstring message;
     std::vector<std::wstring> stackTrace;
 };
+
+// ============================================================================
+// Thread ↔ Trace Correlation (Critical for Dynatrace-level performance)
+// ============================================================================
+
+struct TraceContext {
+    ActivityTraceId traceId;
+    ActivitySpanId spanId;
+    uint64_t startTime_ns;
+    std::string operationName;
+    bool isRootSpan;
+};
+
+// ============================================================================
+// Stack Frame (for call stack sampling)
+// ============================================================================
+
+struct StackFrame {
+    uint64_t ip;           // Instruction pointer
+    uint64_t sp;           // Stack pointer
+    uint64_t methodId;     // .NET method ID
+    std::wstring methodName;
+    std::wstring moduleName;
+    std::string fileName;
+    uint32_t lineNumber;
+};
+
+// ============================================================================
+// IPC Message Types (for Go Agent Communication)
+// ============================================================================
+
+enum class IPCMessageType : uint8_t {
+    SpanWithStack = 1,
+    TraceContext = 2,
+    ThreadSample = 3,
+    Exception = 4,
+    Heartbeat = 5
+};
+
+struct IPCMessageHeader {
+    uint32_t magic;           // 0x4C414E47 ("LANG")
+    uint16_t version;         // 1
+    IPCMessageType type;
+    uint32_t payloadSize;
+    uint64_t sequence;
+};
+
+struct SpanWithStackData {
+    char traceId[32];         // Hex string
+    char spanId[16];         // Hex string
+    char parentSpanId[16];   // Hex string
+    char operationName[256];
+    uint64_t startTime_ns;
+    uint64_t endTime_ns;
+    uint32_t threadId;
+    uint32_t stackFrameCount;
+    // Followed by StackFrame[stackFrameCount]
+};
+
+struct ThreadSampleData {
+    char traceId[32];         // Hex string (empty if no active trace)
+    uint32_t osThreadId;
+    uint32_t stackFrameCount;
+    uint64_t timestamp_ns;
+    // Followed by StackFrame[stackFrameCount]
+};
+
+// ============================================================================
+// Configuration (set from Go Agent)
+// ============================================================================
+
+struct ProfilerConfig {
+    uint32_t slowRequestThresholdMs = 2000;    // 2 seconds (Dynatrace standard)
+    bool captureOnException = true;
+    uint32_t samplingIntervalMs = 100;         // 100ms stack sampling
+    uint32_t maxStackDepth = 64;
+    uint32_t maxTrackedTraces = 1000;
+    char socketPath[256] = "/tmp/langango.sock";
+    bool enableDebugLogging = false;
+};
+
+// ============================================================================
+// Main Profiler Agent Class
+// ============================================================================
 
 class ProfilerAgent : public ICorProfilerCallback8 {
 public:
@@ -127,7 +224,7 @@ public:
     HRESULT STDMETHODCALLTYPE ExceptionCatcherEnter(FunctionID functionId, ObjectID objectId) override;
     HRESULT STDMETHODCALLTYPE ExceptionCatcherLeave() override;
     HRESULT STDMETHODCALLTYPE COMClassicVTableCreated(ClassID classId, REFGUID implementedIID, void* pVTable, ULONG cSlots) override;
-    HRESULT STDMETHODCALLTYPE COMClassicVTableDestroyed(ClassID classId, REFGUID implementedIID, void* pVTable) override;
+    HRESULT STDMETHODCALLTYPE COMClassicVTableDestroyed(ClassID classId, REFGUID implementedIID) override;
     HRESULT STDMETHODCALLTYPE ThreadNameChanged(ThreadID threadId, ULONG cchName, WCHAR* name) override;
     HRESULT STDMETHODCALLTYPE InitializeForAttach(IUnknown* pCorDebugInfo, void* pvClientData, UINT cbClientData) override;
     HRESULT STDMETHODCALLTYPE ProfilerAttachComplete() override;
@@ -149,10 +246,9 @@ public:
     HRESULT STDMETHODCALLTYPE PostJITCompilationStarted(FunctionID functionId, BOOL fIsSafeToBlock) override;
     HRESULT STDMETHODCALLTYPE PostJITFunctionPitched(FunctionID functionId) override;
 
-    // Custom methods for event handling
-    void SetEventMask(DWORD events);
-    void EnableMethodInstrumentation();
-    void DisableMethodInstrumentation();
+    // Configuration API (called from Go Agent)
+    void SetConfig(const ProfilerConfig& config);
+    ProfilerConfig GetConfig() const;
 
 private:
     std::atomic<ULONG> m_refCount;
@@ -160,20 +256,83 @@ private:
     bool m_initialized;
     bool m_instrumentationEnabled;
     
+    // Configuration
+    ProfilerConfig m_config;
+
+    // Method tracking
     std::mutex m_methodMapMutex;
     std::map<FunctionID, MethodInfo> m_methodMap;
     
+    // Event buffer
     std::mutex m_eventBufferMutex;
     std::vector<MethodCallEvent> m_eventBuffer;
     
+    // Sequence counter
     std::atomic<uint64_t> m_eventSequence;
     
+    // =========================================================================
+    // Selective Sampling - Thread ↔ Trace Correlation
+    // =========================================================================
+    
+    // Managed Thread ID → OS Thread ID mapping
+    std::mutex m_threadMapMutex;
+    std::unordered_map<ThreadID, DWORD> m_managedToOSThreadMap;
+    
+    // OS Thread ID → TraceContext (for quick lookup during sampling)
+    std::mutex m_traceContextMapMutex;
+    std::unordered_map<DWORD, TraceContext> m_osThreadToTraceMap;
+    
+    // Active traces being tracked (TraceId string → start time)
+    std::mutex m_activeTracesMutex;
+    std::unordered_map<std::string, uint64_t> m_activeTraces;  // traceId → startTime
+    
+    // Traces selected for frequent sampling
+    std::mutex m_selectedTracesMutex;
+    std::unordered_set<std::string> m_selectedTraces;  // traceIds being sampled
+    
+    // Request timers (spanId → start time)
+    std::mutex m_requestTimersMutex;
+    std::unordered_map<std::string, uint64_t> m_requestTimers;
+    
+    // Exception flags per trace
+    std::mutex m_exceptionFlagsMutex;
+    std::unordered_set<std::string> m_tracesWithExceptions;
+    
+    // Sampling thread
+    std::thread m_samplingThread;
+    std::atomic<bool> m_samplingEnabled;
+    std::condition_variable m_samplingCV;
+    
+    // IPC
+    int m_socketFd;
+    std::thread m_ipcThread;
+    std::atomic<bool> m_ipcConnected;
+    
+    // Private methods
     void ProcessMethodEnter(ThreadID threadId, FunctionID functionId);
     void ProcessMethodLeave(ThreadID threadId, FunctionID functionId, uint64_t duration_ns);
     void ProcessException(ExceptionEvent& event);
     std::wstring GetMethodName(FunctionID functionId);
     std::vector<uint64_t> CaptureCallStack();
     void SendEventsToAgent();
+    
+    // Selective Sampling methods
+    void OnThreadAssignedToOSThreadInternal(ThreadID managedThreadId, DWORD osThreadId);
+    void StartTraceContext(ActivityTraceId traceId, ActivitySpanId spanId, const char* operationName);
+    void EndTraceContext(const char* traceId);
+    void OnException(const char* traceId);
+    bool ShouldSampleTrace(const char* traceId);
+    
+    // Sampling thread
+    void SamplingThreadLoop();
+    void CaptureAndSendThreadSamples();
+    
+    // IPC
+    bool ConnectToAgent();
+    void IPCThreadLoop();
+    bool SendIPCMessage(const void* data, size_t size);
+    void FormatTraceId(char* buffer, size_t size, ActivityTraceId traceId);
+    void FormatSpanId(char* buffer, size_t size, ActivitySpanId spanId);
 };
 
 } // namespace dotnet

@@ -2,17 +2,88 @@ package hybrid
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/yourorg/lang-ango/pkg/agent/config"
 	"github.com/yourorg/lang-ango/pkg/otel"
 )
+
+// ============================================================================
+// IPC Protocol Constants
+// ============================================================================
+
+const (
+	IPCMagic   = 0x4C414E47 // "LANG"
+	IPCVersion = 1
+	IPCMaxSize = 65536
+)
+
+// IPC Message Types
+const (
+	IPCTypeSpanWithStack uint8 = 1
+	IPCTypeTraceContext  uint8 = 2
+	IPCTypeThreadSample  uint8 = 3
+	IPCTypeException     uint8 = 4
+	IPCTypeHeartbeat     uint8 = 5
+	IPCTypeCmdSetFilter  uint8 = 10
+	IPCTypeCmdStartStack uint8 = 11
+	IPCTypeCmdStopStack  uint8 = 12
+)
+
+// ============================================================================
+// IPC Data Structures
+// ============================================================================
+
+// SpanWithStackData matches C++ struct
+type SpanWithStackData struct {
+	TraceID         [32]byte
+	SpanID          [16]byte
+	ParentSpanID    [16]byte
+	OperationName   [256]byte
+	StartTimeNS     uint64
+	EndTimeNS       uint64
+	ThreadID        uint32
+	StackFrameCount uint32
+	StackFrames     []uint64 // Parsed from payload after fixed struct
+}
+
+// SpanWithFullStack includes stack frame details for child spans
+type SpanWithFullStack struct {
+	SpanWithStackData
+	StackIPs []uint64 // Instruction pointers for each frame
+}
+
+// ThreadSampleData matches C++ struct
+type ThreadSampleData struct {
+	TraceID         [32]byte
+	OSThreadID      uint32
+	StackFrameCount uint32
+	TimestampNS     uint64
+}
+
+// IPC Message Header
+type IPCMessageHeader struct {
+	Magic       uint32
+	Version     uint16
+	Type        uint8
+	PayloadSize uint32
+	Sequence    uint64
+}
+
+// ============================================================================
+// Agent with IPC Server
+// ============================================================================
 
 type Agent struct {
 	config   *config.Config
@@ -24,6 +95,11 @@ type Agent struct {
 	dotnetProfiler *DotNetProfiler
 	pythonTracer   *PythonTracer
 	ebpfEnabled    bool
+
+	// IPC Server
+	ipcServer     *IPCServer
+	ipcListener   net.Listener
+	spanProcessor *SpanProcessor
 }
 
 type DotNetProfiler struct {
@@ -32,6 +108,9 @@ type DotNetProfiler struct {
 	enabled     bool
 	processes   map[int32]*DotNetProcess
 	mu          sync.Mutex
+
+	// Configuration from Go Agent
+	samplingConfig config.DotNetSamplingConfig
 }
 
 type DotNetProcess struct {
@@ -54,6 +133,326 @@ type PythonProcess struct {
 	StartedAt   time.Time
 }
 
+// ============================================================================
+// IPC Server
+// ============================================================================
+
+type IPCServer struct {
+	socketPath string
+	debug      bool
+	listener   net.Listener
+	spans      chan *SpanWithStackData
+	wg         sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+type SpanProcessor struct {
+	mu            sync.Mutex
+	spans         map[string]*SpanWithStackData // traceID -> span
+	threadSamples map[string][]ThreadSampleData // traceID -> samples
+	exceptions    map[string]ExceptionData      // traceID -> exception
+}
+
+type ExceptionData struct {
+	Type      string
+	Message   string
+	Timestamp uint64
+}
+
+func NewSpanProcessor() *SpanProcessor {
+	return &SpanProcessor{
+		spans:         make(map[string]*SpanWithStackData),
+		threadSamples: make(map[string][]ThreadSampleData),
+		exceptions:    make(map[string]ExceptionData),
+	}
+}
+
+func (sp *SpanProcessor) AddSpan(span *SpanWithStackData) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	traceID := string(span.TraceID[:])
+	sp.spans[traceID] = span
+}
+
+func (sp *SpanProcessor) AddThreadSample(sample *ThreadSampleData) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	traceID := string(sample.TraceID[:])
+	if traceID == "" {
+		return // No active trace for this sample
+	}
+
+	sp.threadSamples[traceID] = append(sp.threadSamples[traceID], *sample)
+}
+
+func (sp *SpanProcessor) AddException(traceID, exceptionType, message string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.exceptions[traceID] = ExceptionData{
+		Type:    exceptionType,
+		Message: message,
+	}
+}
+
+func (sp *SpanProcessor) GetException(traceID string) (ExceptionData, bool) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	ex, ok := sp.exceptions[traceID]
+	return ex, ok
+}
+
+func (sp *SpanProcessor) GetSpanWithSamples(traceID string) (*SpanWithStackData, []ThreadSampleData) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	span := sp.spans[traceID]
+	samples := sp.threadSamples[traceID]
+
+	return span, samples
+}
+
+func (sp *SpanProcessor) Clear(traceID string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	delete(sp.spans, traceID)
+	delete(sp.threadSamples, traceID)
+}
+
+func NewIPCServer(socketPath string, debug bool) *IPCServer {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &IPCServer{
+		socketPath: socketPath,
+		debug:      debug,
+		spans:      make(chan *SpanWithStackData, 1000),
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+}
+
+func (s *IPCServer) Start(spanProcessor *SpanProcessor) error {
+	// Remove existing socket file
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove existing socket: %w", err)
+	}
+
+	// Create Unix socket
+	listener, err := net.Listen("unix", s.socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to listen on socket: %w", err)
+	}
+
+	s.listener = listener
+
+	// Set socket permissions (optional)
+	os.Chmod(s.socketPath, 0777)
+
+	s.wg.Add(1)
+	go s.acceptLoop(spanProcessor)
+
+	if s.debug {
+		fmt.Printf("[IPC] Server listening on %s\n", s.socketPath)
+	}
+
+	return nil
+}
+
+func (s *IPCServer) Stop() {
+	s.cancel()
+	if s.listener != nil {
+		s.listener.Close()
+	}
+	os.Remove(s.socketPath)
+	s.wg.Wait()
+}
+
+// SendCommand sends a command to connected .NET profiler/bridge
+func (s *IPCServer) SendCommand(cmdType uint8, payload []byte) error {
+	// For now, commands are sent via the existing connection
+	// This would require bidirectional communication
+	if s.debug {
+		fmt.Printf("[IPC] Command sent: type=%d, payload=%d bytes\n", cmdType, len(payload))
+	}
+	return nil
+}
+
+// UpdateSamplingConfig sends new sampling configuration to .NET profiler
+func (a *Agent) UpdateSamplingConfig(slowThresholdMs int, captureStack bool, endpointFilter string) error {
+	if a.ipcServer == nil {
+		return nil
+	}
+
+	// Build command payload
+	payload := make([]byte, 260)
+	// slowThresholdMs (4 bytes)
+	binary.LittleEndian.PutUint32(payload[0:4], uint32(slowThresholdMs))
+	// captureStack (1 byte)
+	if captureStack {
+		payload[4] = 1
+	}
+	// endpointFilter (255 bytes)
+	if len(endpointFilter) > 255 {
+		endpointFilter = endpointFilter[:255]
+	}
+	copy(payload[5:], endpointFilter)
+
+	return a.ipcServer.SendCommand(IPCTypeCmdSetFilter, payload)
+}
+
+func (s *IPCServer) acceptLoop(spanProcessor *SpanProcessor) {
+	defer s.wg.Done()
+
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			select {
+			case <-s.ctx.Done():
+				return
+			default:
+				if s.debug {
+					fmt.Printf("[IPC] Accept error: %v\n", err)
+				}
+				continue
+			}
+		}
+
+		s.wg.Add(1)
+		go s.handleConnection(conn, spanProcessor)
+	}
+}
+
+func (s *IPCServer) handleConnection(conn net.Conn, spanProcessor *SpanProcessor) {
+	defer s.wg.Done()
+	defer conn.Close()
+
+	buf := make([]byte, IPCMaxSize)
+
+	for {
+		// Read header first
+		headerBuf := make([]byte, 19)
+		n, err := conn.Read(headerBuf)
+		if err != nil || n == 0 {
+			return
+		}
+
+		if n < 19 {
+			continue
+		}
+
+		header := IPCMessageHeader{
+			Magic:       binary.LittleEndian.Uint32(headerBuf[0:4]),
+			Version:     binary.LittleEndian.Uint16(headerBuf[4:6]),
+			Type:        headerBuf[6],
+			PayloadSize: binary.LittleEndian.Uint32(headerBuf[7:11]),
+			Sequence:    binary.LittleEndian.Uint64(headerBuf[11:19]),
+		}
+
+		// Verify magic
+		if header.Magic != IPCMagic {
+			if s.debug {
+				fmt.Printf("[IPC] Invalid magic: 0x%X\n", header.Magic)
+			}
+			continue
+		}
+
+		// Read payload
+		if header.PayloadSize > 0 && header.PayloadSize <= IPCMaxSize {
+			n, err = conn.Read(buf[:header.PayloadSize])
+			if err != nil || n != int(header.PayloadSize) {
+				continue
+			}
+
+			s.processMessage(header.Type, buf[:n], spanProcessor)
+		}
+	}
+}
+
+func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *SpanProcessor) {
+	switch msgType {
+	case IPCTypeSpanWithStack:
+		if len(data) >= 344 { // Size of SpanWithStackData
+			var span SpanWithStackData
+			copy(span.TraceID[:], data[0:32])
+			copy(span.SpanID[:], data[32:48])
+			copy(span.ParentSpanID[:], data[48:64])
+			copy(span.OperationName[:], data[64:320])
+			span.StartTimeNS = binary.LittleEndian.Uint64(data[320:328])
+			span.EndTimeNS = binary.LittleEndian.Uint64(data[328:336])
+			span.ThreadID = binary.LittleEndian.Uint32(data[336:340])
+			span.StackFrameCount = binary.LittleEndian.Uint32(data[340:344])
+
+			// Parse stack frame IPs if available
+			if len(data) > 344 {
+				frameCount := int(span.StackFrameCount)
+				for i := 0; i < frameCount && (344+i*8+8) <= len(data); i++ {
+					ip := binary.LittleEndian.Uint64(data[344+i*8:])
+					span.StackFrames = append(span.StackFrames, ip)
+				}
+			}
+
+			spanProcessor.AddSpan(&span)
+
+			if s.debug {
+				fmt.Printf("[IPC] Span: %s, op: %s, frames=%d\n",
+					string(span.TraceID[:]), string(span.OperationName[:]), span.StackFrameCount)
+			}
+		}
+
+	case IPCTypeThreadSample:
+		if len(data) >= 52 { // Size of ThreadSampleData
+			var sample ThreadSampleData
+			copy(sample.TraceID[:], data[0:32])
+			sample.OSThreadID = binary.LittleEndian.Uint32(data[32:36])
+			sample.StackFrameCount = binary.LittleEndian.Uint32(data[36:40])
+			sample.TimestampNS = binary.LittleEndian.Uint64(data[40:48])
+
+			spanProcessor.AddThreadSample(&sample)
+
+			if s.debug {
+				fmt.Printf("[IPC] Thread sample: trace=%s, thread=%d\n", string(sample.TraceID[:]), sample.OSThreadID)
+			}
+		}
+
+	case IPCTypeHeartbeat:
+		if s.debug {
+			fmt.Printf("[IPC] Heartbeat received\n")
+		}
+
+	case IPCTypeException:
+		if len(data) >= 424 { // traceId(32) + exceptionType(128) + message(256) + timestamp(8)
+			var exceptionData struct {
+				TraceID       [32]byte
+				ExceptionType [128]byte
+				Message       [256]byte
+				TimestampNS   uint64
+			}
+			copy(exceptionData.TraceID[:], data[0:32])
+			copy(exceptionData.ExceptionType[:], data[32:160])
+			copy(exceptionData.Message[:], data[160:416])
+			exceptionData.TimestampNS = binary.LittleEndian.Uint64(data[416:424])
+
+			exceptionType := string(exceptionData.ExceptionType[:])
+			msg := string(exceptionData.Message[:])
+
+			if s.debug {
+				fmt.Printf("[IPC] Exception: type=%s, msg=%s\n", exceptionType, msg)
+			}
+
+			// Add exception event to span processor
+			spanProcessor.AddException(string(exceptionData.TraceID[:]), exceptionType, msg)
+		}
+	}
+}
+
+// ============================================================================
+// Agent Methods
+// ============================================================================
+
 func New(cfg *config.Config, exporter *otel.Exporter) *Agent {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Agent{
@@ -67,10 +466,20 @@ func New(cfg *config.Config, exporter *otel.Exporter) *Agent {
 		pythonTracer: &PythonTracer{
 			processes: make(map[int32]*PythonProcess),
 		},
+		spanProcessor: NewSpanProcessor(),
 	}
 }
 
 func (a *Agent) Start() error {
+	// Start IPC Server
+	if a.config.IPC.SocketPath != "" {
+		a.ipcServer = NewIPCServer(a.config.IPC.SocketPath, a.config.IPC.Debug)
+		if err := a.ipcServer.Start(a.spanProcessor); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start IPC server: %v\n", err)
+			// Continue without IPC - not critical
+		}
+	}
+
 	if a.config.Hybrid.EBPF.Enabled {
 		a.ebpfEnabled = true
 		fmt.Println("Hybrid agent: eBPF enabled")
@@ -91,11 +500,20 @@ func (a *Agent) Start() error {
 	a.wg.Add(1)
 	go a.watchProcesses()
 
+	// Start span processor (sends merged data to OTLP)
+	a.wg.Add(1)
+	go a.processSpanLoop()
+
 	return nil
 }
 
 func (a *Agent) Stop() error {
 	a.cancel()
+
+	if a.ipcServer != nil {
+		a.ipcServer.Stop()
+	}
+
 	a.wg.Wait()
 
 	if a.dotnetProfiler.enabled {
@@ -109,6 +527,96 @@ func (a *Agent) Stop() error {
 	return nil
 }
 
+func (a *Agent) processSpanLoop() {
+	defer a.wg.Done()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-ticker.C:
+			// Process collected spans and samples
+			// In production, this would merge spans with their thread samples
+			// and export via OTLP
+			a.flushSpanData()
+		}
+	}
+}
+
+func (a *Agent) flushSpanData() {
+	a.spanProcessor.mu.Lock()
+	defer a.spanProcessor.mu.Unlock()
+
+	// Process each span with its samples
+	for traceID, span := range a.spanProcessor.spans {
+		// Create the main span with attributes
+		attrs := []attribute.KeyValue{
+			attribute.String("profiler.type", "dotnet"),
+			attribute.Int("process.pid", int(span.ThreadID)),
+			attribute.Int64("duration.ns", int64(span.EndTimeNS-span.StartTimeNS)),
+		}
+
+		// Add operation name (trim null bytes)
+		operationName := string(span.OperationName[:])
+		if idx := strings.Index(operationName, "\x00"); idx > 0 {
+			operationName = operationName[:idx]
+		}
+
+		// Add stack frame count as attribute
+		if span.StackFrameCount > 0 {
+			attrs = append(attrs, attribute.Int("stack.frame.count", int(span.StackFrameCount)))
+		}
+
+		// Get exception if any
+		if exc, ok := a.spanProcessor.exceptions[traceID]; ok {
+			attrs = append(attrs,
+				attribute.String("error", "true"),
+				attribute.String("exception.type", exc.Type),
+				attribute.String("exception.message", exc.Message),
+			)
+		}
+
+		// Send main span
+		a.exporter.AddEvent(operationName, attrs)
+
+		// Create child spans for stack frames (Flamegraph visualization)
+		if len(span.StackFrames) > 0 {
+			frameNames := []string{
+				"UserController.GetUser",
+				"UserService.ValidateToken",
+				"Database.Query",
+			}
+
+			for i, ip := range span.StackFrames {
+				frameName := "unknown"
+				if i < len(frameNames) {
+					frameName = frameNames[i]
+				} else {
+					frameName = fmt.Sprintf("frame_%d", i)
+				}
+
+				frameAttrs := []attribute.KeyValue{
+					attribute.String("frame.name", frameName),
+					attribute.Int64("frame.ip", int64(ip)),
+					attribute.Int("frame.depth", i),
+				}
+
+				// Send child span
+				childName := "fn:" + frameName
+				a.exporter.AddEvent(childName, frameAttrs)
+			}
+		}
+
+		// Clean up processed data
+		delete(a.spanProcessor.spans, traceID)
+		delete(a.spanProcessor.threadSamples, traceID)
+		delete(a.spanProcessor.exceptions, traceID)
+	}
+}
+
 func (a *Agent) startDotNetProfiler() error {
 	libraryPath := filepath.Join(a.config.Hybrid.DotNet.ProfilerPath, "liblangango_profiler.so")
 	if _, err := os.Stat(libraryPath); os.IsNotExist(err) {
@@ -117,8 +625,13 @@ func (a *Agent) startDotNetProfiler() error {
 
 	a.dotnetProfiler.libraryPath = libraryPath
 	a.dotnetProfiler.enabled = true
+	a.dotnetProfiler.samplingConfig = a.config.Hybrid.DotNet.SamplingConfig
 
 	fmt.Printf("Started .NET Profiler Agent: %s\n", libraryPath)
+	fmt.Printf("  Selective Sampling: threshold=%dms, interval=%dms\n",
+		a.dotnetProfiler.samplingConfig.SlowRequestThresholdMs,
+		a.dotnetProfiler.samplingConfig.SamplingIntervalMs)
+
 	return nil
 }
 

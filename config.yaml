@@ -44,13 +44,38 @@ ebpf:
   # Maximum number of flows to track
   max_flows: 65536
 
+# .NET Profiler Configuration
+dotnet:
+  enabled: true
+  # Path to the profiler shared library
+  profiler_path: "./dotnet"
+  # Enable selective sampling (Dynatrace-level)
+  selective_sampling:
+    # Slow request threshold in ms (Dynatrace standard: 2000ms)
+    slow_request_threshold_ms: 2000
+    # Capture call stacks on exceptions
+    capture_on_exception: true
+    # Stack sampling interval in ms (100ms = 10 samples/sec)
+    sampling_interval_ms: 100
+    # Maximum stack depth to capture
+    max_stack_depth: 64
+
+# IPC Configuration (Unix Domain Socket)
+ipc:
+  # Socket path for communication with .NET profiler
+  socket_path: "/tmp/langango.sock"
+  # Buffer size in MB
+  buffer_size_mb: 64
+  # Enable debug logging
+  debug: true
+
 # Sampling configuration
 sampling:
   traces:
     # Always sample first request
     initial: 1.0
     # Probabilistic sampling rate
-    probability: 0.01
+    probability: 1.0
     # Rate limit per second
     rate_limit: 100
   profiles:

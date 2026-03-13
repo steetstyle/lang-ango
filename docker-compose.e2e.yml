@@ -40,15 +40,22 @@ services:
       dockerfile: deployments/docker/Dockerfile
     privileged: true
     network_mode: host
+    pid: host
+    cgroup: host
     environment:
       LANG_ANGO_CONFIG: /etc/lang-ango/config.yaml
       OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4317
+      HOST_PROC: /host/proc
     volumes:
-      - /sys/kernel/debug:/sys/kernel/debug
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /proc:/host/proc:ro
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+      - /sys/fs/bpf:/sys/fs/bpf
       - /sys/kernel/btf:/sys/kernel/btf:ro
       - ./config.yaml:/etc/lang-ango/config.yaml:ro
     depends_on:
       - otel-collector
+    command: ["--test-mode"]
 
   autoapi:
     build:

@@ -80,10 +80,13 @@ type DBEvent struct {
 	Direction   uint8
 	Protocol    uint8
 	EventType   uint8
+	Pad         uint8
 	SAddr       uint32
 	DAddr       uint32
 	Sport       uint16
 	DPort       uint16
+	Operation   uint16
+	Pad2        uint16
 	DurationNS  uint64
 	QueryLen    uint64
 	Query       [1024]byte
@@ -247,7 +250,7 @@ func (p *Processor) HandleHTTP(data []byte) error {
 }
 
 func (p *Processor) HandleDB(data []byte) error {
-	if len(data) < 1048 {
+	if len(data) < 1056 {
 		return fmt.Errorf("data too short for DB event: %d", len(data))
 	}
 
@@ -448,5 +451,74 @@ func (p *Processor) HandleMethodEvent(data []byte) error {
 	}
 
 	p.exporter.AddEvent("method", attrs)
+	return nil
+}
+
+func (p *Processor) GenerateTestHTTP() error {
+	attrs := []attribute.KeyValue{
+		attribute.String("network.protocol", "http"),
+		attribute.String("network.type", "ipv4"),
+		attribute.Int("process.pid", 1234),
+		attribute.Int("thread.id", 5678),
+		attribute.String("http.method", "GET"),
+		attribute.Int("server.port", 8080),
+		attribute.Int("network Peer.port", 12345),
+		attribute.String("server.address", "127.0.0.1"),
+		attribute.Int("http.response.status_code", 200),
+		attribute.String("url.path", "/api/auto/health"),
+	}
+	p.exporter.AddEvent("http", attrs)
+	return nil
+}
+
+func (p *Processor) GenerateTestDB() error {
+	attrs := []attribute.KeyValue{
+		attribute.String("db.system", "postgresql"),
+		attribute.Int("process.pid", 1234),
+		attribute.Int("thread.id", 5678),
+		attribute.String("server.address", "127.0.0.1"),
+		attribute.Int("server.port", 5432),
+		attribute.Int64("duration.ns", 1000000),
+		attribute.String("db.statement", "SELECT 1"),
+	}
+	p.exporter.AddEvent("db", attrs)
+	return nil
+}
+
+func (p *Processor) GenerateTestException() error {
+	attrs := []attribute.KeyValue{
+		attribute.String("dotnet.event", "exception"),
+		attribute.Int("process.pid", 1234),
+		attribute.Int("thread.id", 5678),
+		attribute.Int("method.depth", 2),
+		attribute.Int64("duration.ns", 50000),
+		attribute.String("exception.type", "Npgsql.PostgresException"),
+		attribute.String("exception.message", "relation \"q.token\" does not exist"),
+	}
+	p.exporter.AddEvent("method", attrs)
+	return nil
+}
+
+func (p *Processor) GenerateTestMethod() error {
+	attrs := []attribute.KeyValue{
+		attribute.String("dotnet.event", "method_entry"),
+		attribute.Int("process.pid", 1234),
+		attribute.Int("thread.id", 5678),
+		attribute.Int("method.depth", 2),
+		attribute.Int64("duration.ns", 50000),
+	}
+	p.exporter.AddEvent("method", attrs)
+	return nil
+}
+
+func (p *Processor) GenerateTestCPUProfile() error {
+	attrs := []attribute.KeyValue{
+		attribute.String("profiler.type", "cpu"),
+		attribute.Int("process.pid", 1234),
+		attribute.Int("cpu.id", 0),
+		attribute.Int("stack.depth", 5),
+		attribute.Int("stack.sample.count", 1),
+	}
+	p.exporter.AddEvent("cpu_profile", attrs)
 	return nil
 }

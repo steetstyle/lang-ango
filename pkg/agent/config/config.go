@@ -72,9 +72,11 @@ type Config struct {
 		} `mapstructure:"ebpf"`
 
 		DotNet struct {
-			Enabled      bool   `mapstructure:"enabled"`
-			ProfilerPath string `mapstructure:"profiler_path"`
-			EventPipe    bool   `mapstructure:"event_pipe"`
+			Enabled        bool                 `mapstructure:"enabled"`
+			ProfilerPath   string               `mapstructure:"profiler_path"`
+			EventPipe      bool                 `mapstructure:"event_pipe"`
+			SocketPath     string               `mapstructure:"socket_path"`
+			SamplingConfig DotNetSamplingConfig `mapstructure:"selective_sampling"`
 		} `mapstructure:"dotnet"`
 
 		Python struct {
@@ -83,6 +85,19 @@ type Config struct {
 			AgentPort  string `mapstructure:"agent_port"`
 		} `mapstructure:"python"`
 	} `mapstructure:"hybrid"`
+
+	IPC struct {
+		SocketPath   string `mapstructure:"socket_path"`
+		BufferSizeMB int    `mapstructure:"buffer_size_mb"`
+		Debug        bool   `mapstructure:"debug"`
+	} `mapstructure:"ipc"`
+}
+
+type DotNetSamplingConfig struct {
+	SlowRequestThresholdMs uint32 `mapstructure:"slow_request_threshold_ms"`
+	CaptureOnException     bool   `mapstructure:"capture_on_exception"`
+	SamplingIntervalMs     uint32 `mapstructure:"sampling_interval_ms"`
+	MaxStackDepth          uint32 `mapstructure:"max_stack_depth"`
 }
 
 func DefaultConfig() *Config {
@@ -125,9 +140,20 @@ func DefaultConfig() *Config {
 	cfg.Hybrid.DotNet.Enabled = true
 	cfg.Hybrid.DotNet.ProfilerPath = "/usr/local/lib/lang-ango"
 	cfg.Hybrid.DotNet.EventPipe = true
+	cfg.Hybrid.DotNet.SocketPath = "/tmp/langango.sock"
+	cfg.Hybrid.DotNet.SamplingConfig = DotNetSamplingConfig{
+		SlowRequestThresholdMs: 2000,
+		CaptureOnException:     true,
+		SamplingIntervalMs:     100,
+		MaxStackDepth:          64,
+	}
 	cfg.Hybrid.Python.Enabled = true
 	cfg.Hybrid.Python.ModulePath = "/usr/local/lib/python3.10/site-packages"
 	cfg.Hybrid.Python.AgentPort = "localhost:4317"
+
+	cfg.IPC.SocketPath = "/tmp/langango.sock"
+	cfg.IPC.BufferSizeMB = 64
+	cfg.IPC.Debug = false
 
 	return cfg
 }
