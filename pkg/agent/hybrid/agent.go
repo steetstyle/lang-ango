@@ -325,7 +325,11 @@ func (a *Agent) AddSymbol(address uint64, name string) {
 func (a *Agent) GetSymbol(address uint64) string {
 	a.symbolMu.RLock()
 	defer a.symbolMu.RUnlock()
-	return a.symbolTable[address]
+	name := a.symbolTable[address]
+	if name == "" {
+		fmt.Printf("[DEBUG-SYMBOL] Address 0x%x not found in symbol table (size=%d)\n", address, len(a.symbolTable))
+	}
+	return name
 }
 
 func parseW3CTraceID(raw string) string {
@@ -458,6 +462,7 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 				for i := 0; i < frameCount && (344+i*8+8) <= len(data); i++ {
 					ip := binary.LittleEndian.Uint64(data[344+i*8:])
 					span.StackFrames = append(span.StackFrames, ip)
+					fmt.Printf("[DEBUG-FRAME] Frame %d: addr=0x%x\n", i, ip)
 				}
 			}
 
@@ -499,6 +504,9 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 			}
 			// Store in agent's symbol table via SpanProcessor
 			s.agent.AddSymbol(address, name)
+			if s.debug {
+				fmt.Printf("[IPC] Symbol received: addr=0x%x, name=%s\n", address, name)
+			}
 		}
 
 	case IPCTypeException:

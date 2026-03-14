@@ -39,7 +39,7 @@ static const char* get_socket_path() {
 #define CMD_TYPE_START_STACK  2
 #define CMD_TYPE_STOP_STACK   3
 #define CMD_TYPE_HEARTBEAT    4
-#define CMD_TYPE_SYMBOL_UPDATE 5  // New: address -> name mapping
+#define CMD_TYPE_SYMBOL_UPDATE 6  // Must match Go IPCTypeSymbolUpdate
 
 typedef uint8_t BYTE;
 typedef uint16_t WORD;
@@ -528,8 +528,8 @@ void langango_bridge_send_symbol(unsigned long long address, const char* methodN
     
     printf("[BRIDGE] Sending symbol: addr=%llx, name=%s\n", address, methodName);
     
-    // Push to ring buffer with type 5 (symbol update)
-    ring_push(5, (BYTE*)payload, offset);
+    // Push to ring buffer with type 6 (symbol update) - matches Go IPCTypeSymbolUpdate
+    ring_push(CMD_TYPE_SYMBOL_UPDATE, (BYTE*)payload, offset);
 }
 
 void langango_bridge_shutdown() {

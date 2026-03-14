@@ -299,16 +299,26 @@ public class LangAngoStartupHook
                                         // Register symbol with caching
                                         methodName = RegisterMethodSymbol(methodAddr, method);
                                     }
-                                    catch
+                                    catch (Exception ex)
                                     {
                                         // Fallback to metadata token as pseudo-IP
-                                        methodAddr = (IntPtr)method.MetadataToken;
-                                        methodName = method.DeclaringType?.Name + "." + method.Name ?? "Unknown";
+                                        // Note: GetFunctionPointer may fail for some dynamic methods
+                                        Console.Error.WriteLine($"[LangAngo-WARN] GetFunctionPointer failed: {method.Name} -> using metadata token, error: {ex.Message}");
+                                        methodAddr = (IntPtr)((ulong)method.MetadataToken);
+                                        methodName = method.DeclaringType?.FullName != null 
+                                            ? method.DeclaringType.FullName + "." + method.Name 
+                                            : method.Name;
+                                        
+                                        // Register symbol using metadata token address
+                                        _symbolCache.TryAdd(methodAddr, methodName);
+                                        langango_bridge_send_symbol((ulong)methodAddr.ToInt64(), methodName);
+                                        methodName = _symbolCache[methodAddr];
                                     }
                                 }
                                 
                                 // Write address to buffer
                                 Marshal.WriteInt64(frameBuffer, i * 8, methodAddr.ToInt64());
+                                Console.WriteLine($"[LangAngo-FRAME] Frame {i}: addr=0x{methodAddr.ToInt64():X}, name={methodName}");
                             }
                             
                             // Send span with stack frames
@@ -445,6 +455,10 @@ public class LangAngoStartupHook
         {
             fullName = method.DeclaringType.FullName + "." + method.Name;
         }
+        else if (method != null)
+        {
+            fullName = method.Name;
+        }
         else
         {
             fullName = "UnknownMethod";
@@ -456,7 +470,7 @@ public class LangAngoStartupHook
         // Send symbol update to Go agent (first time only)
         try
         {
-            langango_bridge_send_symbol((ulong)methodAddr, fullName);
+            langango_bridge_send_symbol((ulong)methodAddr.ToInt64(), fullName);
             Console.WriteLine($"[LangAngo-SYMBOL] New symbol registered: addr={methodAddr:X}, name={fullName}");
         }
         catch (Exception ex)
