@@ -23,6 +23,8 @@ import (
 	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/yourorg/lang-ango/pkg/logging"
 )
 
 type BufferedSpanProcessor struct {
@@ -59,9 +61,9 @@ func (b *BufferedSpanProcessor) ForceFlush(ctx context.Context) error {
 	for traceID, spans := range b.pending {
 		if len(spans) > 0 {
 			if err := b.exporter.ExportSpans(ctx, spans); err != nil {
-				fmt.Printf("[BUFFER] Failed to export trace %s: %v\n", traceID, err)
+				logging.Error("[BUFFER] Failed to export trace %s: %v", traceID, err)
 			} else {
-				fmt.Printf("[BUFFER] Exported trace %s with %d spans\n", traceID, len(spans))
+				logging.Debug("[BUFFER] Exported trace %s with %d spans", traceID, len(spans))
 			}
 		}
 		delete(b.pending, traceID)
@@ -271,6 +273,12 @@ func (e *Exporter) buildResourceAttrs() []*commonv1.KeyValue {
 }
 
 func (e *Exporter) buildOTLPSpan(s DirectSpan, traceID [16]byte) *tracev1.Span {
+	nameShort := s.Name
+	if len(nameShort) > 30 {
+		nameShort = nameShort[:30]
+	}
+	logging.Debug("[OTLP-EXPORT] span=%x, parent=%x, name=%s", s.SpanID, s.ParentID, nameShort)
+
 	span := &tracev1.Span{
 		TraceId:           traceID[:],
 		SpanId:            s.SpanID[:],
@@ -314,22 +322,14 @@ func attrToOTLP(attr attribute.KeyValue) *commonv1.KeyValue {
 
 func (e *Exporter) exportDirect(ctx context.Context, req *collectortracev1.ExportTraceServiceRequest) error {
 	if e.traceClient == nil {
-		fmt.Printf("[DIRECT-OTLP] No gRPC client, skipping export\n")
 		return nil
-	}
-
-	fmt.Printf("[DIRECT-OTLP] Exporting %d spans\n", len(req.ResourceSpans[0].ScopeSpans[0].Spans))
-	for _, s := range req.ResourceSpans[0].ScopeSpans[0].Spans {
-		fmt.Printf("[DIRECT-OTLP] Span: trace=%x, span=%x, parent=%x, name=%s\n", s.TraceId, s.SpanId, s.ParentSpanId, s.Name)
 	}
 
 	_, err := e.traceClient.Export(ctx, req)
 	if err != nil {
-		fmt.Printf("[DIRECT-OTLP] Export error: %v\n", err)
 		return err
 	}
 
-	fmt.Printf("[DIRECT-OTLP] Export successful\n")
 	return nil
 }
 

@@ -92,6 +92,11 @@ type Config struct {
 		BufferSizeMB int    `mapstructure:"buffer_size_mb"`
 		Debug        bool   `mapstructure:"debug"`
 	} `mapstructure:"ipc"`
+
+	Logging struct {
+		Level  string `mapstructure:"level"`
+		Format string `mapstructure:"format"`
+	} `mapstructure:"logging"`
 }
 
 type DotNetSamplingConfig struct {
@@ -155,6 +160,9 @@ func DefaultConfig() *Config {
 	cfg.IPC.SocketPath = "/tmp/langango.sock"
 	cfg.IPC.BufferSizeMB = 64
 	cfg.IPC.Debug = false
+
+	cfg.Logging.Level = "info"
+	cfg.Logging.Format = "text"
 
 	return cfg
 }

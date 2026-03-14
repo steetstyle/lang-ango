@@ -63,7 +63,7 @@ struct RingItem {
     bool valid;
     BYTE type;
     DWORD payloadSize;
-    BYTE payload[512];
+    BYTE payload[4096];
 };
 
 static RingItem g_ring_buffer[RING_BUFFER_SIZE];
@@ -114,6 +114,7 @@ static int connect_to_server() {
     
     g_socket = socket(AF_UNIX, SOCK_STREAM, 0);
     if (g_socket < 0) {
+        printf("[BRIDGE] Failed to create socket\n");
         pthread_mutex_unlock(&g_socket_mutex);
         return -1;
     }
@@ -123,7 +124,9 @@ static int connect_to_server() {
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, get_socket_path(), sizeof(addr.sun_path) - 1);
     
+    printf("[BRIDGE] Connecting to %s...\n", get_socket_path());
     if (connect(g_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        printf("[BRIDGE] Connection failed: %s\n", strerror(errno));
         close(g_socket);
         g_socket = -1;
         g_connected.store(0);
@@ -131,6 +134,7 @@ static int connect_to_server() {
         return -1;
     }
     
+    printf("[BRIDGE] Connected to Go agent!\n");
     g_connected.store(1);
     g_stats_reconnects++;
     pthread_mutex_unlock(&g_socket_mutex);
@@ -195,18 +199,28 @@ static int ring_pop(RingItem* item) {
 
 // Flush thread with auto-reconnect
 static void* flush_thread(void* arg) {
-    printf("[BRIDGE] Flush thread started\n");
+    fprintf(stderr, "[BRIDGE-DEBUG] Flush thread function entered\n");
+    printf("[BRIDGE] Flush thread started, entering loop...\n"); fflush(stdout);
+    fprintf(stderr, "[BRIDGE-DEBUG] After first printf\n");
+    printf("[BRIDGE] g_running=%d, g_connected=%d\n", g_running.load(), g_connected.load()); fflush(stdout);
+    fprintf(stderr, "[BRIDGE-DEBUG] After second printf\n");
+    
     int reconnect_delay = 1; // Start with 1 second
     
     while (g_running.load()) {
+        // Loop iteration
+        
         // Check connection
         if (g_connected.load() == 0) {
+            printf("[BRIDGE] Not connected, attempting connection...\n"); fflush(stdout);
             if (connect_to_server() < 0) {
+                printf("[BRIDGE] Connection failed, retrying in %ds\n", reconnect_delay); fflush(stdout);
                 sleep(reconnect_delay);
                 reconnect_delay = std::min(reconnect_delay * 2, 30); // Max 30 seconds
                 continue;
             }
         }
+        // Connected, processing
         reconnect_delay = 1; // Reset on success
         
         // Try to send heartbeat occasionally
@@ -379,11 +393,26 @@ uint64_t langango_bridge_get_dropped() { return g_stats_spans_dropped.load(); }
 
 void langango_bridge_init(const char* socketPath) {
     printf("[BRIDGE] Initializing bridge (production mode)\n");
+    fflush(stdout);
+    
+    // Try to connect IMMEDIATELY (before thread creation)
+    printf("[BRIDGE] Attempting initial connection to Go agent...\n");
+    fflush(stdout);
+    if (connect_to_server() == 0) {
+        printf("[BRIDGE] Initial connection successful!\n");
+        fflush(stdout);
+    } else {
+        printf("[BRIDGE] Initial connection failed, will retry in thread\n");
+        fflush(stdout);
+    }
     
     // Start background threads
     static pthread_t flush_tid, cmd_tid;
-    pthread_create(&flush_tid, NULL, flush_thread, NULL);
-    pthread_create(&cmd_tid, NULL, command_listener_thread, NULL);
+    int rc1 = pthread_create(&flush_tid, NULL, flush_thread, NULL);
+    int rc2 = pthread_create(&cmd_tid, NULL, command_listener_thread, NULL);
+    
+    printf("[BRIDGE] pthread_create results: flush_thread=%d, cmd_thread=%d\n", rc1, rc2);
+    fflush(stdout);
 }
 
 void langango_bridge_send_span(
@@ -430,7 +459,7 @@ void langango_bridge_send_span(
     ring_push(1, (BYTE*)payload, offset);
 }
 
-// Send span with stack frames (up to 16 frames)
+// Send span with stack frames and names (up to 16 frames)
 void langango_bridge_send_span_with_stack(
     const char* traceId,
     const char* spanId,
@@ -440,10 +469,13 @@ void langango_bridge_send_span_with_stack(
     long long endTimeNs,
     int threadId,
     void* stackFrames,
-    int frameCount
+    int frameCount,
+    const char* frameNames
 ) {
-    // Build payload with stack frames - DROP if buffer full (non-blocking)
-    char payload[1024];  // Larger buffer for frames
+    printf("[BRIDGE] send_span_with_stack called: frames=%d, traceId=%.8s...\n", frameCount, traceId ? traceId : "null");
+    fflush(stdout);
+    
+    char payload[4096];
     int offset = 0;
     
     memset(payload + offset, 0, 32);
@@ -469,20 +501,31 @@ void langango_bridge_send_span_with_stack(
     memcpy(payload + offset, &threadId, 4);
     offset += 4;
     
-    // Clamp frame count to max 16
     int actualFrames = frameCount > 16 ? 16 : frameCount;
     DWORD fc = (DWORD)actualFrames;
     memcpy(payload + offset, &fc, 4);
     offset += 4;
     
-    // Copy stack frame IPs (8 bytes each)
     if (stackFrames && actualFrames > 0) {
         memcpy(payload + offset, stackFrames, actualFrames * 8);
         offset += actualFrames * 8;
     }
     
-    // Push to ring buffer - NON-BLOCKING
-    ring_push(1, (BYTE*)payload, offset);
+    // Append frame names (pipe-separated strings)
+    if (frameNames && actualFrames > 0) {
+        int namesLen = strlen(frameNames);
+        if (namesLen > 2048) namesLen = 2048;
+        memcpy(payload + offset, frameNames, namesLen);
+        payload[offset + namesLen] = '\0';
+        offset += namesLen + 1;
+    }
+    
+    printf("[BRIDGE] send_span_with_stack: total offset=%d\n", offset);
+    fflush(stdout);
+    
+    int result = ring_push(1, (BYTE*)payload, offset);
+    printf("[BRIDGE] ring_push result=%d\n", result);
+    fflush(stdout);
 }
 
 void langango_bridge_send_exception(

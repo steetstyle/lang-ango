@@ -1,9 +1,10 @@
 package hybrid
 
 import (
-	"fmt"
 	"sync"
 	"time"
+
+	"github.com/yourorg/lang-ango/pkg/logging"
 )
 
 type MovingAverage struct {
@@ -142,10 +143,10 @@ func (s *SamplingController) triggerDeepSampling(operationName string, durationM
 	s.lastAnomalyTime = time.Now()
 	s.samplingEnabled[operationName] = true
 
-	fmt.Printf("[SMART] 🚨 Anomali tespit edildi: %s\n", operationName)
-	fmt.Printf("[SMART]   Süre: %.2fms, Ortalama: %.2fms, Eşik: %.2fms\n",
+	logging.Info("[ANOMALY] 🚨 Anomaly detected: %s", operationName)
+	logging.Info("[ANOMALY]   Duration: %.2fms, Average: %.2fms, Threshold: %.2fms",
 		durationMs, avg, avg*s.thresholdMultiplier)
-	fmt.Printf("[SMART]   → Derin analiz başlatılıyor (traceID: %s)\n", traceID[:min(16, len(traceID))])
+	logging.Info("[ANOMALY]   → Deep analysis enabled (traceID: %s)", traceID[:min(16, len(traceID))])
 
 	// Send command to C++ Bridge to enable deep sampling
 	if s.ipcServer != nil {
@@ -178,7 +179,7 @@ func (s *SamplingController) CheckCooldown(operationName string) bool {
 		s.mu.Lock()
 		s.samplingEnabled[operationName] = false
 		s.mu.Unlock()
-		fmt.Printf("[SMART] ✅ %s normale döndü, derin analiz kapatıldı\n", operationName)
+		logging.Info("[ANOMALY] ✅ %s returned to normal, deep analysis disabled", operationName)
 		return true
 	}
 

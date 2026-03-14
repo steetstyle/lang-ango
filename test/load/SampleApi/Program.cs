@@ -4,7 +4,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add SQLite database
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite("Data Source=sample.db"));
+    options.UseSqlite("Data Source=sample.db")
+          .EnableSensitiveDataLogging()
+          .EnableDetailedErrors());
 
 var app = builder.Build();
 

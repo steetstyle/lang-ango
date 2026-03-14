@@ -55,7 +55,7 @@ public class LangAngoStartupHook
     
     [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern void langango_bridge_send_span_with_stack(
-        string traceId, 
+        string traceId,
         string spanId,
         string parentSpanId,
         string operationName,
@@ -63,7 +63,8 @@ public class LangAngoStartupHook
         long endTimeNs,
         int threadId,
         IntPtr stackFrames,
-        int frameCount
+        int frameCount,
+        string frameNames
     );
     
     [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl)]
@@ -78,6 +79,14 @@ public class LangAngoStartupHook
     // Send symbol update (address -> name mapping) - called once per unique method
     [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern void langango_bridge_send_symbol(ulong address, string methodName);
+    
+    // Send exception event to Go agent
+    [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern void langango_bridge_send_exception(
+        string traceId,
+        string exceptionType,
+        string message
+    );
     
     public static void Initialize()
     {
@@ -129,13 +138,19 @@ public class LangAngoStartupHook
             // Only subscribe to known listeners
             string name = listener.Name;
             
-            if (name == "Microsoft.AspNetCore" ||
+            Console.WriteLine("[LangAngo] Found listener: " + name);
+            
+            bool shouldSubscribe = name == "Microsoft.AspNetCore" ||
                 name == "System.Net.Http" ||
                 name == "Microsoft.EntityFrameworkCore" ||
-                name.StartsWith("System.Net"))
+                name == "Microsoft.EntityFrameworkCore.Database.Command" ||
+                name.StartsWith("System.Net");
+            
+            Console.WriteLine("[LangAngo] Should subscribe? " + shouldSubscribe + " for: " + name);
+            
+            if (shouldSubscribe)
             {
                 Console.WriteLine("[LangAngo] Subscribing to: " + name);
-                
                 listener.Subscribe(new DiagnosticEventObserver(name));
             }
         }
@@ -157,14 +172,20 @@ public class LangAngoStartupHook
         {
             try
             {
-                var activity = Activity.Current;
-                if (activity == null) return;
+                // Log all events for debugging
+                if (_sourceName == "Microsoft.EntityFrameworkCore")
+                {
+                    Console.WriteLine("[LangAngo-DB] Event: " + evnt.Key);
+                }
                 
+                var activity = Activity.Current;
                 string key = evnt.Key;
                 
-                // ASP.NET Core HTTP requests
+                // ASP.NET Core HTTP requests - requires activity
                 if (_sourceName == "Microsoft.AspNetCore")
                 {
+                    if (activity == null) return;
+                    
                     if (key == "Microsoft.AspNetCore.Hosting.HttpRequestIn.Start")
                     {
                         OnRequestStart(activity, evnt.Value);
@@ -173,11 +194,18 @@ public class LangAngoStartupHook
                     {
                         OnRequestStop(activity, evnt.Value);
                     }
+                    else if (key == "Microsoft.AspNetCore.Hosting.UnhandledException" || 
+                             key == "Microsoft.AspNetCore.Diagnostics.HandledException")
+                    {
+                        OnException(activity, evnt.Value);
+                    }
                 }
                 
-                // System.Net.Http HTTP client calls
+                // System.Net.Http HTTP client calls - requires activity
                 else if (_sourceName == "System.Net.Http")
                 {
+                    if (activity == null) return;
+                    
                     if (key == "System.Net.Http.HttpRequestOut.Start")
                     {
                         OnHttpOutStart(activity, evnt.Value);
@@ -188,15 +216,21 @@ public class LangAngoStartupHook
                     }
                 }
                 
-                // Entity Framework Core (database)
+                // Entity Framework Core (database) - can work without activity
                 else if (_sourceName == "Microsoft.EntityFrameworkCore")
                 {
-                    if (key == "Microsoft.EntityFrameworkCore.Database.Command.Start")
+                    Console.WriteLine("[LangAngo-DB] Received event: " + key + ", Activity.Current=" + (Activity.Current?.OperationName ?? "null"));
+                    bool isExecuting = key.Contains("CommandExecuting");
+                    bool isExecuted = key.Contains("CommandExecuted");
+                    Console.WriteLine("[LangAngo-DB] isExecuting=" + isExecuting + ", isExecuted=" + isExecuted);
+                    if (isExecuting)
                     {
+                        Console.WriteLine("[LangAngo-DB] Calling OnDbStart");
                         OnDbStart(activity, evnt.Value);
                     }
-                    else if (key == "Microsoft.EntityFrameworkCore.Database.Command.Stop")
+                    else if (isExecuted)
                     {
+                        Console.WriteLine("[LangAngo-DB] Calling OnDbStop");
                         OnDbStop(activity, evnt.Value);
                     }
                 }
@@ -216,16 +250,16 @@ public class LangAngoStartupHook
         // Store start time in tags for duration calculation
         activity.AddTag("langango.startTime", DateTime.UtcNow.Ticks);
         
-        // Get request path
-        string operationName = activity.OperationName ?? "HTTP";
-        
-        // Try to get the actual URL/path
-        if (payload is IDisposable disposable)
+        // Set AsyncLocal context for nested spans (DB, HTTP client, etc.)
+        // This flows across async boundaries unlike ThreadLocal or ConcurrentDictionary
+        _currentContext.Value = new TraceContext
         {
-            // Try to extract request details from payload
-        }
+            TraceId = activity.TraceId.ToHexString(),
+            ParentSpanId = activity.SpanId.ToHexString()
+        };
         
-        Console.WriteLine("[LangAngo] Request START: " + operationName);
+        string operationName = activity.OperationName ?? "HTTP";
+        Console.WriteLine("[LangAngo] Request START: " + operationName + ", TraceId=" + _currentContext.Value.TraceId.Substring(0, Math.Min(8, _currentContext.Value.TraceId.Length)));
     }
     
     private static void OnRequestStop(Activity activity, object payload)
@@ -237,8 +271,14 @@ public class LangAngoStartupHook
         
         long startTimeTicks = (long)startTimeObj;
         long endTimeTicks = DateTime.UtcNow.Ticks;
-        long startTimeNs = startTimeTicks * 100;
-        long endTimeNs = endTimeTicks * 100;
+        
+        // Convert to Unix nanoseconds: subtract .NET epoch (62135596800 seconds) and convert to nanoseconds
+        // .NET ticks are 100ns units since year 1 AD
+        // Unix epoch is 62135596800 seconds after year 1
+        const long DotNetEpochOffsetTicks = 621355968000000000L; // ticks from year 1 to 1970
+        
+        long startTimeNs = (startTimeTicks - DotNetEpochOffsetTicks) * 100; // Convert ticks to nanoseconds
+        long endTimeNs = (endTimeTicks - DotNetEpochOffsetTicks) * 100;
         
         string operationName = GetOperationName(activity);
         
@@ -253,12 +293,8 @@ public class LangAngoStartupHook
             parentSpanId = activity.ParentSpanId.ToHexString();
         }
         
-        Console.WriteLine($"[LangAngo-DEBUG] TraceID={traceId}, SpanID={spanId}, ParentID={parentSpanId}, Op={operationName}");
-        
-// Check if we should capture stack
+        // Check if we should capture stack
         bool shouldCaptureStack = langango_bridge_should_capture_stack() == 1;
-        
-        Console.WriteLine($"[LangAngo-DEBUG] shouldCaptureStack={shouldCaptureStack}");
         
         if (shouldCaptureStack)
         {
@@ -269,21 +305,20 @@ public class LangAngoStartupHook
                 var frames = stackTrace.GetFrames();
                 int frameCount = frames != null ? frames.Length : 0;
                 
-                Console.WriteLine($"[LangAngo-DEBUG] frameCount={frameCount}");
-                
                 if (frameCount > 0)
                 {
                     // Allocate native buffer for frame IPs
                     IntPtr frameBuffer = Marshal.AllocHGlobal(frameCount * 8);
                     try
                     {
-                        // Get native instruction pointers (skip first 2 frames: this function and OnRequestStop)
+                        // Get native instruction pointers
                         int framesToSend = Math.Min(frameCount - 2, 16);
                         if (framesToSend > 0)
                         {
+                            var frameNamesList = new System.Text.StringBuilder();
+                            
                             for (int i = 0; i < framesToSend; i++)
                             {
-                                // Get method for each frame
                                 var method = frames[i + 2].GetMethod();
                                 IntPtr methodAddr = IntPtr.Zero;
                                 string methodName = "unknown";
@@ -292,50 +327,49 @@ public class LangAngoStartupHook
                                 {
                                     try
                                     {
-                                        // Get actual function pointer
                                         RuntimeMethodHandle handle = method.MethodHandle;
                                         methodAddr = handle.GetFunctionPointer();
                                         
-                                        Console.WriteLine($"[LangAngo-FP] Frame {i}: GetFunctionPointer returned 0x{methodAddr.ToInt64():X} for {method.Name}");
-                                        
-                                        // Register symbol with caching
                                         methodName = RegisterMethodSymbol(methodAddr, method);
                                     }
                                     catch (Exception ex)
                                     {
-                                        // Fallback to metadata token as pseudo-IP
                                         Console.Error.WriteLine($"[LangAngo-FP-ERR] GetFunctionPointer failed for {method.Name}: {ex.Message}");
                                         methodAddr = (IntPtr)((ulong)method.MetadataToken);
-                                        methodName = method.DeclaringType?.FullName != null 
-                                            ? method.DeclaringType.FullName + "." + method.Name 
+                                        methodName = method.DeclaringType?.FullName != null
+                                            ? method.DeclaringType.FullName + "." + method.Name
                                             : method.Name;
                                         
-                                        // Register symbol using metadata token address
                                         _symbolCache.TryAdd(methodAddr, methodName);
                                         langango_bridge_send_symbol((ulong)methodAddr.ToInt64(), methodName);
-                                        methodName = _symbolCache[methodAddr];
                                     }
                                 }
                                 
                                 // Write address to buffer
                                 Marshal.WriteInt64(frameBuffer, i * 8, methodAddr.ToInt64());
-                                Console.WriteLine($"[LangAngo-FRAME] Frame {i}: addr=0x{methodAddr.ToInt64():X}, name={methodName}");
+                                
+                                // Append name with pipe separator (null chars don't marshal well)
+                                if (i > 0) frameNamesList.Append('|');
+                                frameNamesList.Append(methodName);
                             }
                             
-                            // Send span with stack frames
-                            langango_bridge_send_span_with_stack(
-                                traceId,
-                                spanId,
-                                parentSpanId,
-                                operationName,
-                                startTimeNs,
-                                endTimeNs,
-                                Thread.CurrentThread.ManagedThreadId,
-                                frameBuffer,
-                                framesToSend
-                            );
-                            
-                            Console.WriteLine($"[LangAngo] Captured {framesToSend} stack frames for: {operationName}");
+                            // Send span with stack frames AND names
+                            try {
+                                langango_bridge_send_span_with_stack(
+                                    traceId,
+                                    spanId,
+                                    parentSpanId,
+                                    operationName,
+                                    startTimeNs,
+                                    endTimeNs,
+                                    Thread.CurrentThread.ManagedThreadId,
+                                    frameBuffer,
+                                    framesToSend,
+                                    frameNamesList.ToString()
+                                );
+                            } catch (Exception ex) {
+                                Console.WriteLine($"[LangAngo-ERROR] send_span_with_stack failed: {ex.Message}");
+                            }
                             return;
                         }
                     }
@@ -362,6 +396,10 @@ public class LangAngoStartupHook
             Thread.CurrentThread.ManagedThreadId
         );
         
+        // Note: We don't clear _currentContext here to allow nested spans (DB, etc.)
+        // to reference this request's context. The context will be overwritten by the
+        // next request, which is the desired behavior.
+        
         Console.WriteLine("[LangAngo] Request STOP: " + operationName);
     }
     
@@ -380,8 +418,9 @@ public class LangAngoStartupHook
         var startTimeObj = activity.GetTagItem("langango.startTime");
         if (startTimeObj == null) return;
         
-        long startTimeNs = (long)startTimeObj * 100;
-        long endTimeNs = DateTime.UtcNow.Ticks * 100;
+        const long DotNetEpochOffsetTicks = 621355968000000000L;
+        long startTimeNs = ((long)startTimeObj - DotNetEpochOffsetTicks) * 100;
+        long endTimeNs = (DateTime.UtcNow.Ticks - DotNetEpochOffsetTicks) * 100;
         
         string operationName = "HTTP_CLIENT " + (activity.OperationName ?? "Request");
         
@@ -396,29 +435,165 @@ public class LangAngoStartupHook
         );
     }
     
-    private static void OnDbStart(Activity activity, object payload)
+    private static void OnException(Activity activity, object payload)
     {
         if (langango_bridge_is_enabled() == 0) return;
         
-        activity.AddTag("langango.startTime", DateTime.UtcNow.Ticks);
+        try
+        {
+            string traceId = activity.TraceId.ToHexString();
+            string exceptionType = "Unknown";
+            string message = "";
+            
+            // Extract exception info from payload
+            dynamic? payloadObj = payload;
+            if (payloadObj != null)
+            {
+                var prop = payloadObj.GetType().GetProperty("Exception");
+                if (prop != null)
+                {
+                    dynamic? exception = prop.GetValue(payloadObj);
+                    if (exception != null)
+                    {
+                        exceptionType = exception.GetType().FullName ?? "Unknown";
+                        message = exception.Message ?? "";
+                    }
+                }
+            }
+            
+            langango_bridge_send_exception(traceId, exceptionType, message);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[LangAngo-Exception] Error capturing exception: " + ex.Message);
+        }
     }
     
-    private static void OnDbStop(Activity activity, object payload)
+private static void OnDbStart(Activity? activity, object payload)
+	{
+		Console.WriteLine("[LangAngo-DB] OnDbStart called");
+		if (langango_bridge_is_enabled() == 0) return;
+        
+        // Store start time in thread-local for this DB operation
+        _dbStartTime.Value = DateTime.UtcNow.Ticks;
+    }
+    
+    private static readonly System.Threading.ThreadLocal<long> _dbStartTime = new System.Threading.ThreadLocal<long>(() => 0);
+    
+    // Context for linking DB spans to HTTP requests
+    // AsyncLocal flows the value across async boundaries (await calls)
+    private class TraceContext
     {
-        if (langango_bridge_is_enabled() == 0) return;
+        public string TraceId { get; set; } = "";
+        public string ParentSpanId { get; set; } = "";
+    }
+    private static readonly System.Threading.AsyncLocal<TraceContext> _currentContext = new System.Threading.AsyncLocal<TraceContext>();
+    
+private static void OnDbStop(Activity? activity, object payload)
+	{
+		Console.WriteLine("[LangAngo-DB] OnDbStop called");
+		if (langango_bridge_is_enabled() == 0)
+		{
+			Console.WriteLine("[LangAngo-DB] Bridge not enabled, skipping");
+			return;
+		}
         
-        var startTimeObj = activity.GetTagItem("langango.startTime");
-        if (startTimeObj == null) return;
+        // Get start time
+        long startTimeTicks = _dbStartTime.Value;
+        if (startTimeTicks == 0 && activity != null)
+        {
+            var startTimeObj = activity.GetTagItem("langango.db.startTime");
+            if (startTimeObj != null)
+            {
+                startTimeTicks = (long)startTimeObj;
+            }
+        }
         
-        long startTimeNs = (long)startTimeObj * 100;
-        long endTimeNs = DateTime.UtcNow.Ticks * 100;
+        if (startTimeTicks == 0)
+        {
+            startTimeTicks = DateTime.UtcNow.Ticks - 100000; // Assume 10ms
+        }
         
-        string operationName = "DB " + (activity.OperationName ?? "Query");
+        const long DotNetEpochOffsetTicks = 621355968000000000L;
+        long startTimeNs = (startTimeTicks - DotNetEpochOffsetTicks) * 100;
+        long endTimeNs = (DateTime.UtcNow.Ticks - DotNetEpochOffsetTicks) * 100;
         
+        // Get query info from payload
+        string queryInfo = "Query";
+        try
+        {
+            var payloadType = payload?.GetType();
+            var commandProperty = payloadType?.GetProperty("Command");
+            object? command = null;
+            
+            if (commandProperty != null)
+            {
+                command = commandProperty.GetValue(payload);
+            }
+            
+            if (command != null)
+            {
+                var commandText = command.GetType().GetProperty("CommandText")?.GetValue(command);
+                if (commandText != null)
+                {
+                    string sql = commandText.ToString() ?? "";
+                    int newlineIdx = sql.IndexOf('\n');
+                    if (newlineIdx > 0) sql = sql.Substring(0, newlineIdx);
+                    if (sql.Length > 60) sql = sql.Substring(0, 60) + "...";
+                    queryInfo = sql;
+                }
+            }
+        }
+        catch { }
+        
+        string operationName = "DB: " + queryInfo;
+        
+        // Get trace context from HTTP request via AsyncLocal or Activity.Current
+        string traceId = "";
+        string spanId = "";
+        string parentSpanId = "";
+        
+var currentActivity = Activity.Current;
+		var asyncContext = _currentContext.Value;
+		
+		// Debug: Log what context is available
+		Console.WriteLine($"[LangAngo-DB] Context check: Activity={(currentActivity != null ? currentActivity.OperationName : "null")}, AsyncLocal={(asyncContext != null ? asyncContext.TraceId.Substring(0, Math.Min(8, asyncContext.TraceId.Length)) : "null")}");
+		
+		try
+        {
+            if (currentActivity != null)
+            {
+                Console.WriteLine("[LangAngo-DB] ACTIVITY BRANCH");
+                // Best case: Activity context is available
+                traceId = currentActivity.TraceId.ToHexString();
+                parentSpanId = currentActivity.SpanId.ToHexString();
+                Console.WriteLine($"[LangAngo-DB] Using Activity: traceId={traceId.Substring(0, 16)}, parentSpanId={parentSpanId}");
+                spanId = Guid.NewGuid().ToString("N").Substring(0, 16);
+            }
+            else if (asyncContext != null && !string.IsNullOrEmpty(asyncContext.TraceId))
+            {
+                // Use AsyncLocal context that flows across async boundaries
+                traceId = asyncContext.TraceId;
+                parentSpanId = asyncContext.ParentSpanId;
+                spanId = Guid.NewGuid().ToString("N").Substring(0, 16);
+                Console.WriteLine($"[LangAngo-DB] Using AsyncLocal: traceId={traceId.Substring(0, 8)}, parentSpanId={parentSpanId}");
+            }
+            else
+            {
+                // No context available - create standalone trace
+                traceId = Guid.NewGuid().ToString("N");
+                spanId = Guid.NewGuid().ToString("N").Substring(0, 16);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[LangAngo-DB] OnDbStop-Exception: {ex.Message}");
+            Console.Out.Flush();
+        }
         langango_bridge_send_span(
-            activity.Id ?? activity.TraceId.ToHexString(),
-            activity.SpanId.ToHexString(),
-            activity.ParentId ?? "",
+            traceId,
+            spanId,
+            parentSpanId,
             operationName,
             startTimeNs,
             endTimeNs,

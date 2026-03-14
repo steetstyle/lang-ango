@@ -44,7 +44,7 @@ dotnet build -c Release
 
 # 5. Start Sample API with StartupHook
 echo "[5/6] Starting Sample API with StartupHook..."
-export DOTNET_STARTUP_HOOKS="$PROJECT_ROOT/dotnet/startup-hook/LangAngo.StartupHook.dll"
+export DOTNET_STARTUP_HOOKS="$PROJECT_ROOT/dotnet/startup-hook/LangAngo.StartupHook/bin/Release/net9.0/langango.dll"
 export LD_LIBRARY_PATH="$PROJECT_ROOT/dotnet/startup-hook:$LD_LIBRARY_PATH"
 export LANGANGO_SERVICE_NAME=SampleApi
 

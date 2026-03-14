@@ -71,6 +71,13 @@ ipc:
   # Enable debug logging
   debug: true
 
+# Logging configuration
+logging:
+  # Log level: debug, info, warn, error
+  level: debug
+  # Output format: text
+  format: text
+
 # Sampling configuration
 sampling:
   traces:

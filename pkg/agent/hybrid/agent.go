@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/yourorg/lang-ango/pkg/agent/config"
+	"github.com/yourorg/lang-ango/pkg/logging"
 	"github.com/yourorg/lang-ango/pkg/otel"
 )
 
@@ -267,7 +268,7 @@ func (s *IPCServer) Start(spanProcessor *SpanProcessor) error {
 	go s.acceptLoop(spanProcessor)
 
 	if s.debug {
-		fmt.Printf("[IPC] Server listening on %s\n", s.socketPath)
+		logging.Info("[IPC] Server listening on %s", s.socketPath)
 	}
 
 	return nil
@@ -287,7 +288,7 @@ func (s *IPCServer) SendCommand(cmdType uint8, payload []byte) error {
 	// For now, commands are sent via the existing connection
 	// This would require bidirectional communication
 	if s.debug {
-		fmt.Printf("[IPC] Command sent: type=%d, payload=%d bytes\n", cmdType, len(payload))
+		logging.Info("[IPC] Command sent: type=%d, payload=%d bytes", cmdType, len(payload))
 	}
 	return nil
 }
@@ -319,7 +320,7 @@ func (a *Agent) AddSymbol(address uint64, name string) {
 	a.symbolMu.Lock()
 	defer a.symbolMu.Unlock()
 	a.symbolTable[address] = name
-	fmt.Printf("[AGENT] Symbol added: addr=%x, name=%s\n", address, name)
+	logging.Info("[AGENT] Symbol added: addr=%x, name=%s", address, name)
 }
 
 func (a *Agent) GetSymbol(address uint64) string {
@@ -334,7 +335,7 @@ func (a *Agent) GetSymbol(address uint64) string {
 		}
 	}
 	if name == "" {
-		fmt.Printf("[DEBUG-SYMBOL] Address 0x%x not found in symbol table (size=%d)\n", address, len(a.symbolTable))
+		logging.Debug("[DEBUG-SYMBOL] Address 0x%x not found in symbol table (size=%d)", address, len(a.symbolTable))
 	}
 	return name
 }
@@ -392,7 +393,7 @@ func (s *IPCServer) acceptLoop(spanProcessor *SpanProcessor) {
 				return
 			default:
 				if s.debug {
-					fmt.Printf("[IPC] Accept error: %v\n", err)
+					logging.Info("[IPC] Accept error: %v", err)
 				}
 				continue
 			}
@@ -432,7 +433,7 @@ func (s *IPCServer) handleConnection(conn net.Conn, spanProcessor *SpanProcessor
 		// Verify magic
 		if header.Magic != IPCMagic {
 			if s.debug {
-				fmt.Printf("[IPC] Invalid magic: 0x%X\n", header.Magic)
+				logging.Info("[IPC] Invalid magic: 0x%X", header.Magic)
 			}
 			continue
 		}
@@ -450,6 +451,7 @@ func (s *IPCServer) handleConnection(conn net.Conn, spanProcessor *SpanProcessor
 }
 
 func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *SpanProcessor) {
+	logging.Debug("[DEBUG-IPC] Received message type=%d, len=%d", msgType, len(data))
 	switch msgType {
 	case IPCTypeSpanWithStack:
 		if len(data) >= 344 { // Size of SpanWithStackData
@@ -469,14 +471,14 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 				for i := 0; i < frameCount && (344+i*8+8) <= len(data); i++ {
 					ip := binary.LittleEndian.Uint64(data[344+i*8:])
 					span.StackFrames = append(span.StackFrames, ip)
-					fmt.Printf("[DEBUG-FRAME] Frame %d: addr=0x%x\n", i, ip)
+					logging.Debug("[DEBUG-FRAME] Frame %d: addr=0x%x", i, ip)
 				}
 			}
 
 			spanProcessor.AddSpan(&span)
 
 			if s.debug {
-				fmt.Printf("[IPC] Span: %s, op: %s, frames=%d\n",
+				logging.Info("[IPC] Span: %s, op: %s, frames=%d",
 					string(span.TraceID[:]), string(span.OperationName[:]), span.StackFrameCount)
 			}
 		}
@@ -492,26 +494,24 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 			spanProcessor.AddThreadSample(&sample)
 
 			if s.debug {
-				fmt.Printf("[IPC] Thread sample: trace=%s, thread=%d\n", string(sample.TraceID[:]), sample.OSThreadID)
+				logging.Info("[IPC] Thread sample: trace=%s, thread=%d", string(sample.TraceID[:]), sample.OSThreadID)
 			}
 		}
 
 	case IPCTypeHeartbeat:
 		if s.debug {
-			fmt.Printf("[IPC] Heartbeat received\n")
+			logging.Info("[IPC] Heartbeat received")
 		}
 
 	case IPCTypeSymbolUpdate:
-		// Symbol update: 8 bytes address + null-terminated name
-		fmt.Printf("[IPC-DEBUG] Received SymbolUpdate, len(data)=%d\n", len(data))
+		logging.Debug("[DEBUG-IPC] Received SymbolUpdate, len(data)=%d", len(data))
 		if len(data) >= 9 && s.agent != nil {
 			address := binary.LittleEndian.Uint64(data[0:8])
 			name := string(data[8:])
 			if idx := strings.Index(name, "\x00"); idx > 0 {
 				name = name[:idx]
 			}
-			fmt.Printf("[IPC-DEBUG] SymbolUpdate: addr=0x%x, name=%s\n", address, name)
-			// Store in agent's symbol table via SpanProcessor
+			logging.Debug("[DEBUG-IPC] SymbolUpdate: addr=0x%x, name=%s", address, name)
 			s.agent.AddSymbol(address, name)
 		}
 
@@ -532,7 +532,7 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 			msg := string(exceptionData.Message[:])
 
 			if s.debug {
-				fmt.Printf("[IPC] Exception: type=%s, msg=%s\n", exceptionType, msg)
+				logging.Info("[IPC] Exception: type=%s, msg=%s", exceptionType, msg)
 			}
 
 			// Add exception event to span processor
@@ -650,7 +650,7 @@ func (a *Agent) flushSpanData() {
 		return
 	}
 
-	fmt.Printf("[DEBUG-FLUSH] Processing %d spans\n", spanCount)
+	logging.Debug("[DEBUG-FLUSH] Processing %d spans", spanCount)
 
 	for traceID, span := range a.spanProcessor.spans {
 		attrs := []attribute.KeyValue{
@@ -680,14 +680,14 @@ func (a *Agent) flushSpanData() {
 		spanIDRaw := strings.TrimRight(string(span.SpanID[:]), "\x00")
 		parentIDRaw := strings.TrimRight(string(span.ParentSpanID[:]), "\x00")
 
-		fmt.Printf("[DEBUG-OTLP] Raw IDs: TraceID='%s', SpanID='%s', ParentID='%s'\n",
+		logging.Debug("[DEBUG-OTLP] Raw IDs: TraceID='%s', SpanID='%s', ParentID='%s'",
 			traceIDRaw, spanIDRaw, parentIDRaw)
 
 		traceIDStr := parseW3CTraceID(traceIDRaw)
 		spanIDStr := parseW3CSpanID(spanIDRaw)
 		parentIDStr := parseW3CSpanID(parentIDRaw)
 
-		fmt.Printf("[DEBUG-OTLP] Parsed IDs: TraceID=%s (len=%d), SpanID=%s, ParentID=%s\n",
+		logging.Debug("[DEBUG-OTLP] Parsed IDs: TraceID=%s (len=%d), SpanID=%s, ParentID=%s",
 			traceIDStr, len(traceIDStr), spanIDStr, parentIDStr)
 
 		var mainSpan otel.DirectSpan
@@ -744,6 +744,23 @@ func (a *Agent) flushSpanData() {
 					frameEndNs = span.EndTimeNS
 				}
 
+				frameDurationNs := frameEndNs - frameStartNs
+				frameAttrs := []attribute.KeyValue{
+					attribute.String("profiler.type", "dotnet"),
+					attribute.Int64("duration.ns", int64(frameDurationNs)),
+					attribute.String("frame.name", frameName),
+					attribute.Int64("frame.ip", int64(ip)),
+					attribute.Int("frame.depth", i),
+				}
+
+				frameCategory := categorizeFrame(frameName)
+				frameAttrs = append(frameAttrs,
+					attribute.String("frame.category", frameCategory),
+					attribute.Bool("frame.is_db", frameCategory == "database"),
+					attribute.Bool("frame.is_async", frameCategory == "async"),
+					attribute.Bool("frame.is_business", frameCategory == "business"),
+				)
+
 				childSpan := otel.DirectSpan{
 					IPCSpanContext: otel.IPCSpanContext{
 						TraceID:  mainSpan.TraceID,
@@ -753,27 +770,12 @@ func (a *Agent) flushSpanData() {
 					Name:      "fn:" + frameName,
 					StartTime: time.Unix(0, int64(frameStartNs)),
 					EndTime:   time.Unix(0, int64(frameEndNs)),
-					Attrs:     attrs,
+					Attrs:     frameAttrs,
 				}
 
-				// Add frame-specific attributes
-				frameCategory := categorizeFrame(frameName)
-				childSpan.Attrs = append(childSpan.Attrs,
-					attribute.String("frame.name", frameName),
-					attribute.Int64("frame.ip", int64(ip)),
-					attribute.Int("frame.depth", i),
-					attribute.String("frame.category", frameCategory),
-					attribute.Bool("frame.is_db", frameCategory == "database"),
-					attribute.Bool("frame.is_async", frameCategory == "async"),
-					attribute.Bool("frame.is_business", frameCategory == "business"),
-				)
-
-				// Mark slow frames (>100ms)
-				frameDurationMs := frameDuration / 1e6 // ns to ms
-				if frameDurationMs > 100 {
+				if frameDurationNs > 100e6 {
 					childSpan.Attrs = append(childSpan.Attrs,
 						attribute.Bool("frame.slow", true),
-						attribute.Int64("frame.duration_ms", int64(frameDurationMs)),
 					)
 				}
 				directSpans = append(directSpans, childSpan)
@@ -781,7 +783,7 @@ func (a *Agent) flushSpanData() {
 		}
 
 		if err := a.exporter.ExportSpansDirect(directSpans); err != nil {
-			fmt.Printf("[DEBUG-OTLP] Export error: %v\n", err)
+			logging.Debug("[DEBUG-OTLP] Export error: %v", err)
 		}
 
 		delete(a.spanProcessor.spans, traceID)
@@ -800,8 +802,8 @@ func (a *Agent) startDotNetProfiler() error {
 	a.dotnetProfiler.enabled = true
 	a.dotnetProfiler.samplingConfig = a.config.Hybrid.DotNet.SamplingConfig
 
-	fmt.Printf("Started .NET Profiler Agent: %s\n", libraryPath)
-	fmt.Printf("  Selective Sampling: threshold=%dms, interval=%dms\n",
+	logging.Info("Started .NET Profiler Agent: %s", libraryPath)
+	logging.Info("  Selective Sampling: threshold=%dms, interval=%dms",
 		a.dotnetProfiler.samplingConfig.SlowRequestThresholdMs,
 		a.dotnetProfiler.samplingConfig.SamplingIntervalMs)
 
@@ -841,7 +843,7 @@ func (a *Agent) attachDotNetProfiler(pid int32) error {
 	}
 	a.dotnetProfiler.mu.Unlock()
 
-	fmt.Printf("Attached .NET profiler to PID %d\n", pid)
+	logging.Info("Attached .NET profiler to PID %d", pid)
 	return nil
 }
 
@@ -854,7 +856,7 @@ func (a *Agent) detachDotNetProfiler(pid int32) error {
 	}
 
 	delete(a.dotnetProfiler.processes, pid)
-	fmt.Printf("Detached .NET profiler from PID %d\n", pid)
+	logging.Info("Detached .NET profiler from PID %d", pid)
 	return nil
 }
 
@@ -868,7 +870,7 @@ func (a *Agent) startPythonTracer() error {
 	a.pythonTracer.enabled = true
 	a.pythonTracer.agentPort = a.config.Hybrid.Python.AgentPort
 
-	fmt.Printf("Started Python Tracer: %s\n", modulePath)
+	logging.Info("Started Python Tracer: %s", modulePath)
 	return nil
 }
 
@@ -908,7 +910,7 @@ func (a *Agent) attachPythonTracer(pid int32) error {
 	}
 	a.pythonTracer.mu.Unlock()
 
-	fmt.Printf("Attached Python tracer to PID %d\n", pid)
+	logging.Info("Attached Python tracer to PID %d", pid)
 	return nil
 }
 
@@ -921,7 +923,7 @@ func (a *Agent) detachPythonTracer(pid int32) error {
 	}
 
 	delete(a.pythonTracer.processes, pid)
-	fmt.Printf("Detached Python tracer from PID %d\n", pid)
+	logging.Info("Detached Python tracer from PID %d", pid)
 	return nil
 }
 
