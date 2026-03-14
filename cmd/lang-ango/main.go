@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/lang-ango/pkg/agent/config"
 	"github.com/yourorg/lang-ango/pkg/agent/hybrid"
 	"github.com/yourorg/lang-ango/pkg/ebpf"
+	"github.com/yourorg/lang-ango/pkg/logging"
 	"github.com/yourorg/lang-ango/pkg/otel"
 	"github.com/yourorg/lang-ango/pkg/processor"
 )
@@ -48,6 +49,12 @@ func main() {
 	defer cancel()
 
 	cfg, err := loadConfig(configFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	logging.SetLevel(cfg.Logging.Level)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)

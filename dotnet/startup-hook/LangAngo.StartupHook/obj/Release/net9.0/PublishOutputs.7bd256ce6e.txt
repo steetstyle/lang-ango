@@ -1,3 +1,0 @@
-/src/LangAngo.StartupHook/publish/langango.dll
-/src/LangAngo.StartupHook/publish/langango.deps.json
-/src/LangAngo.StartupHook/publish/langango.pdb
