@@ -113,3 +113,73 @@ run:
 # Kubernetes deployment
 k8s-deploy:
 	kubectl apply -f deployments/kubernetes/
+
+# ============================================
+# Docker Compose and E2E Testing
+# ============================================
+
+.PHONY: docker-up docker-down docker-logs run-all stop test-curl test-traces
+
+docker-up:
+	@echo "Starting with Docker Compose..."
+	docker-compose up --build -d
+
+docker-down:
+	@echo "Stopping Docker Compose..."
+	docker-compose down
+
+docker-logs:
+	docker-compose logs -f
+
+# run-all: Start Jaeger, Agent, and Sample API locally
+run-all: run-jaeger run-agent run-sampleapi
+	@echo ""
+	@echo "==========================================="
+	@echo "All services started!"
+	@echo "==========================================="
+	@echo "Jaeger UI:     http://localhost:16686"
+	@echo "Sample API:    http://localhost:5002"
+	@echo "OTLP gRPC:     localhost:4317"
+	@echo "==========================================="
+
+run-jaeger:
+	@echo "Starting Jaeger..."
+	@docker rm -f lang-ango-jaeger 2>/dev/null || true
+	docker run -d --name lang-ango-jaeger \
+		-p 16686:16686 \
+		-p 4317:4317 \
+		-p 4318:4318 \
+		jaegertracing/all-in-one:latest
+	@sleep 2
+
+run-agent: build
+	@echo "Starting Go agent..."
+	@pkill -f "bin/lang-ango" 2>/dev/null || true
+	@sleep 1
+	OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 \
+	OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
+	./bin/lang-ango &
+
+run-sampleapi:
+	@echo "Starting Sample API..."
+	@pkill -f "SampleApi" 2>/dev/null || true
+	@sleep 1
+	cd test/load/SampleApi && \
+	DOTNET_STARTUP_HOOKS=$(PWD)/dotnet/startup-hook/LangAngo.StartupHook/bin/Release/net9.0/langango.dll \
+	dotnet bin/Release/net9.0/SampleApi.dll --urls "http://localhost:5002" &
+
+stop:
+	@echo "Stopping all services..."
+	@pkill -f "bin/lang-ango" 2>/dev/null || true
+	@pkill -f "SampleApi" 2>/dev/null || true
+	@docker rm -f lang-ango-jaeger 2>/dev/null || true
+	@echo "All services stopped."
+
+test-curl:
+	@echo "Sending test request..."
+	@curl -s http://localhost:5002/api/data || echo "API not responding"
+
+test-traces:
+	@echo "Checking Jaeger for recent traces..."
+	@curl -s 'http://localhost:16686/api/traces?service=lang-ango&limit=5&lookback=60s' | python3 -c \
+		"import sys,json; d=json.load(sys.stdin); print(f'{len(d[\"data\"])} traces found')"

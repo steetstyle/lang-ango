@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: lang-ango-jaeger
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - lang-ango-net
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lang-ango-agent
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+    volumes:
+      - /tmp:/tmp
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      - jaeger
+    networks:
+      - lang-ango-net
+
+  sample-api:
+    build:
+      context: ./test/load/SampleApi
+      dockerfile: Dockerfile
+    container_name: lang-ango-sampleapi
+    environment:
+      - DOTNET_STARTUP_HOOKS=/app/langango.dll
+      - ASPNETCORE_URLS=http://+:80
+    volumes:
+      - /tmp:/tmp
+      - ./dotnet/startup-hook/LangAngo.StartupHook/bin/Release/net9.0:/app/hooks:ro
+    ports:
+      - "5002:80"
+    depends_on:
+      - agent
+    networks:
+      - lang-ango-net
+
+networks:
+  lang-ango-net:
+    driver: bridge
