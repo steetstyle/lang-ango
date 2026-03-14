@@ -255,8 +255,10 @@ public class LangAngoStartupHook
         
         Console.WriteLine($"[LangAngo-DEBUG] TraceID={traceId}, SpanID={spanId}, ParentID={parentSpanId}, Op={operationName}");
         
-        // Check if we should capture stack
+// Check if we should capture stack
         bool shouldCaptureStack = langango_bridge_should_capture_stack() == 1;
+        
+        Console.WriteLine($"[LangAngo-DEBUG] shouldCaptureStack={shouldCaptureStack}");
         
         if (shouldCaptureStack)
         {
@@ -265,7 +267,9 @@ public class LangAngoStartupHook
             {
                 var stackTrace = new System.Diagnostics.StackTrace(true);
                 var frames = stackTrace.GetFrames();
-                int frameCount = frames != null ? Math.Min(frames.Length, 16) : 0;
+                int frameCount = frames != null ? frames.Length : 0;
+                
+                Console.WriteLine($"[LangAngo-DEBUG] frameCount={frameCount}");
                 
                 if (frameCount > 0)
                 {

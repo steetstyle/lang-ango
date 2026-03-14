@@ -336,16 +336,16 @@ func parseW3CTraceID(raw string) string {
 		return -1
 	}, raw)
 
-	if len(cleaned) >= 34 && strings.HasPrefix(cleaned, "00") {
-		cleaned = cleaned[2:34]
-	}
-
 	if len(cleaned) > 32 {
-		cleaned = cleaned[:32]
+		if strings.HasPrefix(cleaned, "00") && len(cleaned) >= 34 {
+			cleaned = cleaned[2:34]
+		} else {
+			cleaned = cleaned[:32]
+		}
 	}
 
-	if len(cleaned) < 32 {
-		cleaned = strings.Repeat("0", 32-len(cleaned)) + cleaned
+	for len(cleaned) < 32 {
+		cleaned = "0" + cleaned
 	}
 
 	return cleaned

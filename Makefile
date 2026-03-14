@@ -122,11 +122,11 @@ k8s-deploy:
 
 docker-up:
 	@echo "Starting with Docker Compose..."
-	docker-compose up --build -d
+	docker compose up --build -d
 
 docker-down:
 	@echo "Stopping Docker Compose..."
-	docker-compose down
+	docker compose down
 
 docker-logs:
 	docker-compose logs -f
