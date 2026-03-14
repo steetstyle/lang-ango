@@ -1,3 +1,0 @@
-/tmp/publish/langango.dll
-/tmp/publish/langango.deps.json
-/tmp/publish/langango.pdb

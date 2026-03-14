@@ -733,12 +733,28 @@ func (a *Agent) flushSpanData() {
 					Name:      "fn:" + frameName,
 					StartTime: time.Unix(0, int64(frameStartNs)),
 					EndTime:   time.Unix(0, int64(frameEndNs)),
-					Attrs: []attribute.KeyValue{
-						attribute.String("frame.name", frameName),
-						attribute.Int64("frame.ip", int64(ip)),
-						attribute.Int("frame.depth", i),
-						attribute.String("frame.category", categorizeFrame(frameName)),
-					},
+					Attrs:     attrs,
+				}
+
+				// Add frame-specific attributes
+				frameCategory := categorizeFrame(frameName)
+				childSpan.Attrs = append(childSpan.Attrs,
+					attribute.String("frame.name", frameName),
+					attribute.Int64("frame.ip", int64(ip)),
+					attribute.Int("frame.depth", i),
+					attribute.String("frame.category", frameCategory),
+					attribute.Bool("frame.is_db", frameCategory == "database"),
+					attribute.Bool("frame.is_async", frameCategory == "async"),
+					attribute.Bool("frame.is_business", frameCategory == "business"),
+				)
+
+				// Mark slow frames (>100ms)
+				frameDurationMs := frameDuration / 1e6 // ns to ms
+				if frameDurationMs > 100 {
+					childSpan.Attrs = append(childSpan.Attrs,
+						attribute.Bool("frame.slow", true),
+						attribute.Int64("frame.duration_ms", int64(frameDurationMs)),
+					)
 				}
 				directSpans = append(directSpans, childSpan)
 			}
@@ -939,28 +955,73 @@ func (a *Agent) checkPythonProcesses() {
 }
 
 // categorizeFrame determines the category of a frame based on its name
+// and detects slow operations for better observability
 func categorizeFrame(name string) string {
 	lowerName := strings.ToLower(name)
 	switch {
+	// Database operations
 	case strings.Contains(lowerName, "database") || strings.Contains(lowerName, "db") ||
 		strings.Contains(lowerName, "query") || strings.Contains(lowerName, "sql") ||
-		strings.Contains(lowerName, "entityframework") || strings.Contains(lowerName, "dapper"):
+		strings.Contains(lowerName, "entityframework") || strings.Contains(lowerName, "dapper") ||
+		strings.Contains(lowerName, "npgsql") || strings.Contains(lowerName, "mysql") ||
+		strings.Contains(lowerName, "sqlite") || strings.Contains(lowerName, "mongodb") ||
+		strings.Contains(lowerName, "redis") || strings.Contains(lowerName, "connection"):
 		return "database"
+
+	// HTTP/API operations
 	case strings.Contains(lowerName, "http") || strings.Contains(lowerName, "request") ||
 		strings.Contains(lowerName, "client") || strings.Contains(lowerName, "api") ||
-		strings.Contains(lowerName, "controller"):
+		strings.Contains(lowerName, "controller") || strings.Contains(lowerName, "middleware") ||
+		strings.Contains(lowerName, "endpoint") || strings.Contains(lowerName, "router"):
 		return "http"
+
+	// Async operations
 	case strings.Contains(lowerName, "async") || strings.Contains(lowerName, "task") ||
 		strings.Contains(lowerName, "await") || strings.Contains(lowerName, "movenext") ||
-		strings.Contains(lowerName, "statemachine"):
+		strings.Contains(lowerName, "statemachine") || strings.Contains(lowerName, "continuation") ||
+		strings.Contains(lowerName, "taskcompletionsource"):
 		return "async"
+
+	// Business logic
 	case strings.Contains(lowerName, "service") || strings.Contains(lowerName, "repository") ||
-		strings.Contains(lowerName, "handler") || strings.Contains(lowerName, "manager"):
+		strings.Contains(lowerName, "handler") || strings.Contains(lowerName, "manager") ||
+		strings.Contains(lowerName, "validator") || strings.Contains(lowerName, "calculator") ||
+		strings.Contains(lowerName, "processor") || strings.Contains(lowerName, "factory"):
 		return "business"
+
+	// Exception handling
 	case strings.Contains(lowerName, "exception") || strings.Contains(lowerName, "error") ||
-		strings.Contains(lowerName, "throw"):
+		strings.Contains(lowerName, "throw") || strings.Contains(lowerName, "catch") ||
+		strings.Contains(lowerName, "fault") || strings.Contains(lowerName, "fail"):
 		return "exception"
+
+	// Serialization/IO
+	case strings.Contains(lowerName, "serializ") || strings.Contains(lowerName, "deserializ") ||
+		strings.Contains(lowerName, "json") || strings.Contains(lowerName, "xml") ||
+		strings.Contains(lowerName, "file") || strings.Contains(lowerName, "stream"):
+		return "io"
+
 	default:
 		return "runtime"
+	}
+}
+
+// getFrameCategoryIcon returns an icon for frame category
+func getFrameCategoryIcon(category string) string {
+	switch category {
+	case "database":
+		return "🗄"
+	case "http":
+		return "🌐"
+	case "async":
+		return "⚡"
+	case "business":
+		return "💼"
+	case "exception":
+		return "❌"
+	case "io":
+		return "📁"
+	default:
+		return "⚙"
 	}
 }

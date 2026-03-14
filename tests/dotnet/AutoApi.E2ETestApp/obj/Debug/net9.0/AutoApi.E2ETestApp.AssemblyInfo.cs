@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AutoApi.E2ETestApp")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+32409736a76555c2001190f3da96e2e0e2d3530d")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+670065788a9ec49182b890ea2064777fc493d196")]
 [assembly: System.Reflection.AssemblyProductAttribute("AutoApi.E2ETestApp")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AutoApi.E2ETestApp")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
