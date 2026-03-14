@@ -327,6 +327,13 @@ func (a *Agent) GetSymbol(address uint64) string {
 	defer a.symbolMu.RUnlock()
 	name := a.symbolTable[address]
 	if name == "" {
+		// Try metadata token address (0x600XXXX -> lower 3 bytes)
+		metadataAddr := address & 0xFFFFFF
+		if metadataAddr != address {
+			name = a.symbolTable[metadataAddr]
+		}
+	}
+	if name == "" {
 		fmt.Printf("[DEBUG-SYMBOL] Address 0x%x not found in symbol table (size=%d)\n", address, len(a.symbolTable))
 	}
 	return name
@@ -702,16 +709,26 @@ func (a *Agent) flushSpanData() {
 		directSpans := []otel.DirectSpan{mainSpan}
 
 		if len(span.StackFrames) > 0 {
+			// Deduplicate frames by IP address first
+			seenIPs := make(map[uint64]bool)
+			uniqueFrames := make([]uint64, 0, len(span.StackFrames))
+			for _, ip := range span.StackFrames {
+				if !seenIPs[ip] {
+					seenIPs[ip] = true
+					uniqueFrames = append(uniqueFrames, ip)
+				}
+			}
+
 			// Calculate frame duration from parent span
 			// Each frame gets proportional slice of parent duration
 			parentDuration := span.EndTimeNS - span.StartTimeNS
-			numFrames := uint64(len(span.StackFrames))
+			numFrames := uint64(len(uniqueFrames))
 			frameDuration := parentDuration / numFrames
 			if frameDuration < 1000 { // Minimum 1µs per frame
 				frameDuration = 1000
 			}
 
-			for i, ip := range span.StackFrames {
+			for i, ip := range uniqueFrames {
 				frameName := a.GetSymbol(ip)
 				if frameName == "" {
 					frameName = fmt.Sprintf("frame_%d", i)
