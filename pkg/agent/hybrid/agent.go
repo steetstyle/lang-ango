@@ -699,6 +699,15 @@ func (a *Agent) flushSpanData() {
 		directSpans := []otel.DirectSpan{mainSpan}
 
 		if len(span.StackFrames) > 0 {
+			// Calculate frame duration from parent span
+			// Each frame gets proportional slice of parent duration
+			parentDuration := span.EndTimeNS - span.StartTimeNS
+			numFrames := uint64(len(span.StackFrames))
+			frameDuration := parentDuration / numFrames
+			if frameDuration < 1000 { // Minimum 1µs per frame
+				frameDuration = 1000
+			}
+
 			for i, ip := range span.StackFrames {
 				frameName := a.GetSymbol(ip)
 				if frameName == "" {
@@ -708,6 +717,13 @@ func (a *Agent) flushSpanData() {
 				var childSpanID [8]byte
 				rand.Read(childSpanID[:])
 
+				// Calculate frame timing (distribute across parent timeline)
+				frameStartNs := span.StartTimeNS + uint64(i)*frameDuration
+				frameEndNs := frameStartNs + frameDuration
+				if frameEndNs > span.EndTimeNS {
+					frameEndNs = span.EndTimeNS
+				}
+
 				childSpan := otel.DirectSpan{
 					IPCSpanContext: otel.IPCSpanContext{
 						TraceID:  mainSpan.TraceID,
@@ -715,12 +731,13 @@ func (a *Agent) flushSpanData() {
 						ParentID: mainSpan.SpanID,
 					},
 					Name:      "fn:" + frameName,
-					StartTime: mainSpan.StartTime.Add(time.Duration(i) * time.Microsecond),
-					EndTime:   mainSpan.StartTime.Add(time.Duration(i+1) * time.Microsecond),
+					StartTime: time.Unix(0, int64(frameStartNs)),
+					EndTime:   time.Unix(0, int64(frameEndNs)),
 					Attrs: []attribute.KeyValue{
 						attribute.String("frame.name", frameName),
 						attribute.Int64("frame.ip", int64(ip)),
 						attribute.Int("frame.depth", i),
+						attribute.String("frame.category", categorizeFrame(frameName)),
 					},
 				}
 				directSpans = append(directSpans, childSpan)
@@ -919,4 +936,31 @@ func (a *Agent) checkDotNetProcesses() {
 
 func (a *Agent) checkPythonProcesses() {
 	// Similar logic for Python
+}
+
+// categorizeFrame determines the category of a frame based on its name
+func categorizeFrame(name string) string {
+	lowerName := strings.ToLower(name)
+	switch {
+	case strings.Contains(lowerName, "database") || strings.Contains(lowerName, "db") ||
+		strings.Contains(lowerName, "query") || strings.Contains(lowerName, "sql") ||
+		strings.Contains(lowerName, "entityframework") || strings.Contains(lowerName, "dapper"):
+		return "database"
+	case strings.Contains(lowerName, "http") || strings.Contains(lowerName, "request") ||
+		strings.Contains(lowerName, "client") || strings.Contains(lowerName, "api") ||
+		strings.Contains(lowerName, "controller"):
+		return "http"
+	case strings.Contains(lowerName, "async") || strings.Contains(lowerName, "task") ||
+		strings.Contains(lowerName, "await") || strings.Contains(lowerName, "movenext") ||
+		strings.Contains(lowerName, "statemachine"):
+		return "async"
+	case strings.Contains(lowerName, "service") || strings.Contains(lowerName, "repository") ||
+		strings.Contains(lowerName, "handler") || strings.Contains(lowerName, "manager"):
+		return "business"
+	case strings.Contains(lowerName, "exception") || strings.Contains(lowerName, "error") ||
+		strings.Contains(lowerName, "throw"):
+		return "exception"
+	default:
+		return "runtime"
+	}
 }
