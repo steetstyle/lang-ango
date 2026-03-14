@@ -110,7 +110,7 @@ func DefaultConfig() *Config {
 
 	cfg.Discovery.Interval = 10 * time.Second
 
-	cfg.OTel.Endpoint = "localhost:4317"
+	cfg.OTel.Endpoint = "localhost:4319"
 	cfg.OTel.Insecure = true
 
 	cfg.Prometheus.Enabled = true

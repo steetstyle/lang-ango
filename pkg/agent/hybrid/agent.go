@@ -638,9 +638,12 @@ func (a *Agent) flushSpanData() {
 	a.spanProcessor.mu.Lock()
 	defer a.spanProcessor.mu.Unlock()
 
-	if len(a.spanProcessor.spans) > 0 {
-		fmt.Printf("[DEBUG-FLUSH] Processing %d spans\n", len(a.spanProcessor.spans))
+	spanCount := len(a.spanProcessor.spans)
+	if spanCount == 0 {
+		return
 	}
+
+	fmt.Printf("[DEBUG-FLUSH] Processing %d spans\n", spanCount)
 
 	for traceID, span := range a.spanProcessor.spans {
 		attrs := []attribute.KeyValue{
