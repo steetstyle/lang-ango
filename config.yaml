@@ -18,10 +18,12 @@ discovery:
 
 # OpenTelemetry configuration
 otel:
-  # OTLP endpoint (gRPC)
-  endpoint: "localhost:4317"
+  # OTLP endpoint
+  endpoint: "localhost:4318"
   # Use insecure connection
   insecure: true
+  # Protocol: grpc or http
+  protocol: "http"
 
 # Prometheus metrics
 prometheus:

@@ -18,10 +18,28 @@
 #define SOCKET_PATH "/tmp/langango.sock"
 #define COMMAND_SOCKET_PATH "/tmp/langango_cmd.sock"
 
+// Runtime-configurable socket path
+static char g_custom_socket_path[256] = {0};
+
+// Set custom socket path (called from .NET before init) - extern C to prevent name mangling
+extern "C" {
+    void langango_bridge_set_socket_path(const char* path) {
+        if (path && strlen(path) < 250) {
+            strncpy(g_custom_socket_path, path, 255);
+            printf("[BRIDGE] Custom socket path set to: %s\n", path);
+        }
+    }
+}
+
+static const char* get_socket_path() {
+    return g_custom_socket_path[0] ? g_custom_socket_path : SOCKET_PATH;
+}
+
 #define CMD_TYPE_SET_FILTER    1
 #define CMD_TYPE_START_STACK  2
 #define CMD_TYPE_STOP_STACK   3
 #define CMD_TYPE_HEARTBEAT    4
+#define CMD_TYPE_SYMBOL_UPDATE 5  // New: address -> name mapping
 
 typedef uint8_t BYTE;
 typedef uint16_t WORD;
@@ -72,7 +90,7 @@ static struct {
 } g_config = {
     .enabled = 1,
     .slow_threshold_ms = 2000,
-    .capture_stack = 0,
+    .capture_stack = 1,  // Default to enabled for testing
     .endpoint_filter = {0},
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
@@ -103,7 +121,7 @@ static int connect_to_server() {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, get_socket_path(), sizeof(addr.sun_path) - 1);
     
     if (connect(g_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(g_socket);
@@ -144,6 +162,9 @@ static int ring_push(BYTE type, const BYTE* data, DWORD size) {
     }
     g_ring_head.store(next_head);
     pthread_mutex_unlock(&g_ring_mutex);
+    
+    printf("[BRIDGE] Pushed span to ring buffer, type=%d, size=%d\n", type, size);
+    fflush(stdout);
     
     return 0;
 }
@@ -297,9 +318,17 @@ static void* command_listener_thread(void* arg) {
                         g_on_config_change(slow_threshold, capture_stack, filter);
                     }
                 }
+                
+                if (hdr->type == CMD_TYPE_SYMBOL_UPDATE && hdr->payloadSize >= 12) {
+                    // Symbol update: 8 bytes address + variable length name
+                    QWORD address = *(QWORD*)payload;
+                    char* name = payload + 8;
+                    printf("[BRIDGE] Symbol update: addr=%llx, name=%s\n", (unsigned long long)address, name);
+                }
             }
         }
         
+        close(client);
         close(client);
     }
     
@@ -401,6 +430,61 @@ void langango_bridge_send_span(
     ring_push(1, (BYTE*)payload, offset);
 }
 
+// Send span with stack frames (up to 16 frames)
+void langango_bridge_send_span_with_stack(
+    const char* traceId,
+    const char* spanId,
+    const char* parentSpanId,
+    const char* operationName,
+    long long startTimeNs,
+    long long endTimeNs,
+    int threadId,
+    void* stackFrames,
+    int frameCount
+) {
+    // Build payload with stack frames - DROP if buffer full (non-blocking)
+    char payload[1024];  // Larger buffer for frames
+    int offset = 0;
+    
+    memset(payload + offset, 0, 32);
+    if (traceId) strncpy(payload + offset, traceId, 32);
+    offset += 32;
+    
+    memset(payload + offset, 0, 16);
+    if (spanId) strncpy(payload + offset, spanId, 16);
+    offset += 16;
+    
+    memset(payload + offset, 0, 16);
+    if (parentSpanId) strncpy(payload + offset, parentSpanId, 16);
+    offset += 16;
+    
+    memset(payload + offset, 0, 256);
+    if (operationName) strncpy(payload + offset, operationName, 255);
+    offset += 256;
+    
+    memcpy(payload + offset, &startTimeNs, 8);
+    offset += 8;
+    memcpy(payload + offset, &endTimeNs, 8);
+    offset += 8;
+    memcpy(payload + offset, &threadId, 4);
+    offset += 4;
+    
+    // Clamp frame count to max 16
+    int actualFrames = frameCount > 16 ? 16 : frameCount;
+    DWORD fc = (DWORD)actualFrames;
+    memcpy(payload + offset, &fc, 4);
+    offset += 4;
+    
+    // Copy stack frame IPs (8 bytes each)
+    if (stackFrames && actualFrames > 0) {
+        memcpy(payload + offset, stackFrames, actualFrames * 8);
+        offset += actualFrames * 8;
+    }
+    
+    // Push to ring buffer - NON-BLOCKING
+    ring_push(1, (BYTE*)payload, offset);
+}
+
 void langango_bridge_send_exception(
     const char* traceId,
     const char* exceptionType,
@@ -426,6 +510,26 @@ void langango_bridge_send_exception(
     offset += 8;
     
     ring_push(4, (BYTE*)payload, offset);
+}
+
+// Send symbol update (address -> name mapping) to Go agent
+void langango_bridge_send_symbol(unsigned long long address, const char* methodName) {
+    char payload[512];
+    int offset = 0;
+    
+    // 8 bytes for address
+    memcpy(payload + offset, &address, 8);
+    offset += 8;
+    
+    // Method name (variable length, null-terminated)
+    memset(payload + offset, 0, 500);
+    if (methodName) strncpy(payload + offset, methodName, 499);
+    offset += (int)strlen(methodName) + 1;
+    
+    printf("[BRIDGE] Sending symbol: addr=%llx, name=%s\n", address, methodName);
+    
+    // Push to ring buffer with type 5 (symbol update)
+    ring_push(5, (BYTE*)payload, offset);
 }
 
 void langango_bridge_shutdown() {

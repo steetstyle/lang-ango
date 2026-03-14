@@ -1,0 +1,83 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/roy/github-projects/lang-ango/tests/dotnet/AutoApi.E2ETestApp/AutoApi.E2ETestApp.csproj": {}
+  },
+  "projects": {
+    "/home/roy/github-projects/lang-ango/tests/dotnet/AutoApi.E2ETestApp/AutoApi.E2ETestApp.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/roy/github-projects/lang-ango/tests/dotnet/AutoApi.E2ETestApp/AutoApi.E2ETestApp.csproj",
+        "projectName": "AutoApi.E2ETestApp",
+        "projectPath": "/home/roy/github-projects/lang-ango/tests/dotnet/AutoApi.E2ETestApp/AutoApi.E2ETestApp.csproj",
+        "packagesPath": "/home/roy/.nuget/packages/",
+        "outputPath": "/home/roy/github-projects/lang-ango/tests/dotnet/AutoApi.E2ETestApp/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/roy/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net9.0"
+        ],
+        "sources": {
+          "/usr/lib/dotnet/library-packs": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net9.0": {
+            "targetAlias": "net9.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.100"
+      },
+      "frameworks": {
+        "net9.0": {
+          "targetAlias": "net9.0",
+          "dependencies": {
+            "Npgsql": {
+              "target": "Package",
+              "version": "[9.0.0, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.NETCore.App.Host.linux-x64",
+              "version": "[9.0.14, 9.0.14]"
+            }
+          ],
+          "frameworkReferences": {
+            "Microsoft.AspNetCore.App": {
+              "privateAssets": "none"
+            },
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/lib/dotnet/sdk/10.0.104/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 package hybrid
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,22 +29,32 @@ type ServiceEdge struct {
 	Errors int64  `json:"errors"`
 }
 
+type AnomalyAlert struct {
+	Service         string    `json:"service"`
+	Endpoint        string    `json:"endpoint"`
+	LatencyMs       float64   `json:"latency_ms"`
+	NormalLatencyMs float64   `json:"normal_latency_ms"`
+	TraceID         string    `json:"trace_id"`
+	Severity        string    `json:"severity"`
+	Timestamp       time.Time `json:"timestamp"`
+}
+
 type AlertManager struct {
 	slackWebhook string
 	opsgenieAPI  string
 	jaegerURL    string
 }
 
-func NewAlertManager(cfg *config.Config) *AlertManager {
+func NewAlertManager(slackWebhook, opsgenieAPI, jaegerURL string) *AlertManager {
 	return &AlertManager{
-		slackWebhook: cfg.Alerting.SlackWebhook,
-		opsgenieAPI:  cfg.Alerting.OpsGenieAPI,
-		jaegerURL:    cfg.Jaeger.URL,
+		slackWebhook: slackWebhook,
+		opsgenieAPI:  opsgenieAPI,
+		jaegerURL:    jaegerURL,
 	}
 }
 
 func (a *AlertManager) SendAnomalyAlert(alert AnomalyAlert) error {
-	msg := fmt.Sprintf("🚨 *Anomali Tespit Edildi*\n\n*Service:* %s\n*Endpoint:* %s\n*Latency:* %.2fms (normal: %.2fms)\n*Trace:* %s\n\n<a href=\"%s/traces/%s\">Jaeger'da Görüntüle</a>",
+	msg := fmt.Sprintf("🚨 *Anomali Tespit Edildi*\n\n*Service:* %s\n*Endpoint:* %s\n*Latency:* %.2fms (normal: %.2fms)\n*Trace:* `%s`\n\n<%s/traces/%s|Jaeger'da Görüntüle>",
 		alert.Service,
 		alert.Endpoint,
 		alert.LatencyMs,
@@ -57,37 +68,19 @@ func (a *AlertManager) SendAnomalyAlert(alert AnomalyAlert) error {
 		a.sendSlack(msg)
 	}
 
-	if a.opsgenieAPI != "" {
-		a.sendOpsGenie(alert, msg)
-	}
-
 	return nil
 }
 
 func (a *AlertManager) sendSlack(msg string) {
 	payload := map[string]interface{}{
-		"text": msg,
+		"text":   msg,
+		"mrkdwn": true,
 	}
 
 	jsonBytes, _ := json.Marshal(payload)
-	http.Post(a.slackWebhook, "application/json", nil)
+	http.Post(a.slackWebhook, "application/json", bytes.NewBuffer(jsonBytes))
 }
 
-func (a *AlertManager) sendOpsGenie(alert AnomalyAlert, msg string) {
-	// OpsGenie API call would go here
-}
-
-type AnomalyAlert struct {
-	Service         string
-	Endpoint        string
-	LatencyMs       float64
-	NormalLatencyMs float64
-	TraceID         string
-	Severity        string
-	Timestamp       time.Time
-}
-
-// ServiceMapFetcher queries Jaeger for service dependencies
 type ServiceMapFetcher struct {
 	jaegerURL string
 	client    *http.Client

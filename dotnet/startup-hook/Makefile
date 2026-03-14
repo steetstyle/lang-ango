@@ -2,7 +2,7 @@
 
 CXX := g++
 CXXFLAGS := -std=c++17 -fPIC -O2 -g -Wall -shared
-LDFLAGS := -pthread
+LDFLAGS := -pthread -rdynamic
 
 TARGET := liblangango_bridge.so
 SOURCES := bridge.cpp

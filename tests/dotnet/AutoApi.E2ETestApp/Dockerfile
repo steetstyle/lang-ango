@@ -12,6 +12,9 @@ RUN dotnet publish -c Release -o /app/publish
 FROM base AS final
 WORKDIR /app
 COPY --from=build /app/publish .
+# Copy Lang-Ango startup hook
+COPY langango.dll /app/
+COPY liblangango_bridge.so /app/
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080
 ENTRYPOINT ["dotnet", "AutoApi.E2ETestApp.dll"]
 

@@ -24,6 +24,7 @@ type Config struct {
 	OTel struct {
 		Endpoint string `mapstructure:"endpoint"`
 		Insecure bool   `mapstructure:"insecure"`
+		Protocol string `mapstructure:"protocol"`
 	} `mapstructure:"otel"`
 
 	Prometheus struct {

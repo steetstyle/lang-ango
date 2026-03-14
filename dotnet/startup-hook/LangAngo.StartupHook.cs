@@ -12,9 +12,19 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+
+public class StartupHook
+{
+    public static void Initialize()
+    {
+        Console.WriteLine("[LangAngo] StartupHook is starting...");
+        LangAngoStartupHook.Initialize();
+    }
+}
 
 public class LangAngoStartupHook
 {
@@ -22,7 +32,10 @@ public class LangAngoStartupHook
     private static readonly object _lock = new object();
     
     // P/Invoke to C++ bridge
-    [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, EntryPoint = "langango_bridge_set_socket_path")]
+    private static extern void langango_bridge_set_socket_path(string path);
+    
+    [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, EntryPoint = "langango_bridge_init")]
     private static extern void langango_bridge_init(string socketPath);
     
     [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
@@ -37,6 +50,19 @@ public class LangAngoStartupHook
     );
     
     [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern void langango_bridge_send_span_with_stack(
+        string traceId, 
+        string spanId,
+        string parentSpanId,
+        string operationName,
+        long startTimeNs,
+        long endTimeNs,
+        int threadId,
+        IntPtr stackFrames,
+        int frameCount
+    );
+    
+    [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl)]
     private static extern int langango_bridge_should_capture_stack();
     
     [DllImport("liblangango_bridge.so", CallingConvention = CallingConvention.Cdecl)]
@@ -58,7 +84,11 @@ public class LangAngoStartupHook
         try
         {
             // Initialize C++ bridge
-            string socketPath = "/tmp/langango.sock";
+            string socketPath = Environment.GetEnvironmentVariable("LANGANGO_SOCKET_PATH") ?? "/tmp/langango.sock";
+            
+            // Set the socket path in the C++ bridge
+            langango_bridge_set_socket_path(socketPath);
+            
             langango_bridge_init(socketPath);
             Console.WriteLine("[LangAngo] Bridge initialized on " + socketPath);
             
@@ -173,7 +203,7 @@ public class LangAngoStartupHook
     
     private static void OnRequestStart(Activity activity, object payload)
     {
-        if (!langango_bridge_is_enabled()) return;
+        if (langango_bridge_is_enabled() == 0) return;
         
         // Store start time in tags for duration calculation
         activity.AddTag("langango.startTime", DateTime.UtcNow.Ticks);
@@ -192,9 +222,9 @@ public class LangAngoStartupHook
     
     private static void OnRequestStop(Activity activity, object payload)
     {
-        if (!langango_bridge_is_enabled()) return;
+        if (langango_bridge_is_enabled() == 0) return;
         
-        var startTimeObj = activity.GetTag("langango.startTime");
+        var startTimeObj = activity.GetTagItem("langango.startTime");
         if (startTimeObj == null) return;
         
         long startTimeTicks = (long)startTimeObj;
@@ -204,12 +234,83 @@ public class LangAngoStartupHook
         
         string operationName = GetOperationName(activity);
         
-        // Convert IDs to hex strings
-        string traceId = activity.Id ?? activity.TraceId.ToHexString();
+        // Use Activity's TraceId and SpanId - these are the real W3C format IDs
+        string traceId = activity.TraceId.ToHexString();
         string spanId = activity.SpanId.ToHexString();
-        string parentSpanId = activity.ParentId ?? (activity.ParentSpanId.IsEmpty ? "" : activity.ParentSpanId.ToHexString());
         
-        // Send to bridge
+        // ParentSpanId - only set if there's actually a parent
+        string parentSpanId = "";
+        if (activity.ParentSpanId != default)
+        {
+            parentSpanId = activity.ParentSpanId.ToHexString();
+        }
+        
+        Console.WriteLine($"[LangAngo-DEBUG] TraceID={traceId}, SpanID={spanId}, ParentID={parentSpanId}, Op={operationName}");
+        
+        // Check if we should capture stack
+        bool shouldCaptureStack = langango_bridge_should_capture_stack() == 1;
+        
+        if (shouldCaptureStack)
+        {
+            // Capture stack trace using .NET StackTrace
+            try
+            {
+                var stackTrace = new System.Diagnostics.StackTrace(true);
+                var frames = stackTrace.GetFrames();
+                int frameCount = frames != null ? Math.Min(frames.Length, 16) : 0;
+                
+                if (frameCount > 0)
+                {
+                    // Allocate native buffer for frame IPs
+                    IntPtr frameBuffer = Marshal.AllocHGlobal(frameCount * 8);
+                    try
+                    {
+                        // Get native instruction pointers (skip first 2 frames: this function and OnRequestStop)
+                        int framesToSend = Math.Min(frameCount - 2, 16);
+                        if (framesToSend > 0)
+                        {
+                            for (int i = 0; i < framesToSend; i++)
+                            {
+                                // Get method handle for each frame
+                                var method = frames[i + 2].GetMethod();
+                                if (method != null)
+                                {
+                                    // Use method's metadata token as pseudo-IP (simplified)
+                                    ulong pseudoIP = (ulong)method.MetadataToken;
+                                    Marshal.WriteInt64(frameBuffer, i * 8, (long)pseudoIP);
+                                }
+                            }
+                            
+                            // Send span with stack frames
+                            langango_bridge_send_span_with_stack(
+                                traceId,
+                                spanId,
+                                parentSpanId,
+                                operationName,
+                                startTimeNs,
+                                endTimeNs,
+                                Thread.CurrentThread.ManagedThreadId,
+                                frameBuffer,
+                                framesToSend
+                            );
+                            
+                            Console.WriteLine($"[LangAngo] Captured {framesToSend} stack frames for: {operationName}");
+                            return;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(frameBuffer);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[LangAngo] Stack capture error: " + ex.Message);
+            }
+        }
+        
+        // Fallback: send without stack frames
         langango_bridge_send_span(
             traceId,
             spanId,
@@ -220,19 +321,12 @@ public class LangAngoStartupHook
             Thread.CurrentThread.ManagedThreadId
         );
         
-        // Check if we should capture stack
-        if (langango_bridge_should_capture_stack() == 1)
-        {
-            Console.WriteLine("[LangAngo] Stack capture requested for: " + operationName);
-            // Stack capture would be triggered here in full implementation
-        }
-        
         Console.WriteLine("[LangAngo] Request STOP: " + operationName);
     }
     
     private static void OnHttpOutStart(Activity activity, object payload)
     {
-        if (!langango_bridge_is_enabled()) return;
+        if (langango_bridge_is_enabled() == 0) return;
         
         activity.AddTag("langango.startTime", DateTime.UtcNow.Ticks);
         activity.AddTag("langango.isOutgoing", "true");
@@ -240,9 +334,9 @@ public class LangAngoStartupHook
     
     private static void OnHttpOutStop(Activity activity, object payload)
     {
-        if (!langango_bridge_is_enabled()) return;
+        if (langango_bridge_is_enabled() == 0) return;
         
-        var startTimeObj = activity.GetTag("langango.startTime");
+        var startTimeObj = activity.GetTagItem("langango.startTime");
         if (startTimeObj == null) return;
         
         long startTimeNs = (long)startTimeObj * 100;
@@ -263,16 +357,16 @@ public class LangAngoStartupHook
     
     private static void OnDbStart(Activity activity, object payload)
     {
-        if (!langango_bridge_is_enabled()) return;
+        if (langango_bridge_is_enabled() == 0) return;
         
         activity.AddTag("langango.startTime", DateTime.UtcNow.Ticks);
     }
     
     private static void OnDbStop(Activity activity, object payload)
     {
-        if (!langango_bridge_is_enabled()) return;
+        if (langango_bridge_is_enabled() == 0) return;
         
-        var startTimeObj = activity.GetTag("langango.startTime");
+        var startTimeObj = activity.GetTagItem("langango.startTime");
         if (startTimeObj == null) return;
         
         long startTimeNs = (long)startTimeObj * 100;
@@ -303,14 +397,5 @@ public class LangAngoStartupHook
         
         // Fall back to kind
         return activity.Kind.ToString();
-    }
-}
-
-// Entry point called by .NET runtime
-public static class EntryPoint
-{
-    public static void Initialize()
-    {
-        LangAngoStartupHook.Initialize();
     }
 }

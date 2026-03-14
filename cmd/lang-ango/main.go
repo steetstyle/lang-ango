@@ -63,6 +63,10 @@ func main() {
 		cfg.OTel.Insecure = true
 	}
 
+	if proto := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"); proto != "" {
+		cfg.OTel.Protocol = proto
+	}
+
 	if Version != "" {
 		fmt.Printf("Lang-Ango v%s (build: %s)\n", Version, Build)
 	}
@@ -70,6 +74,7 @@ func main() {
 	otelExporter, err := otel.NewExporter(&otel.Config{
 		OTelEndpoint:   cfg.OTel.Endpoint,
 		OTelInsecure:   cfg.OTel.Insecure,
+		OTelProtocol:   cfg.OTel.Protocol,
 		ServiceName:    cfg.Service.Name,
 		ServiceVersion: cfg.Service.Version,
 		Environment:    cfg.Service.Environment,
@@ -94,15 +99,14 @@ func main() {
 		go runTestMode(ctx, proc)
 	} else {
 		if err := ebpf.EnsurePermissions(); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to ensure eBPF permissions: %v\n", err)
-			os.Exit(1)
-		}
+			fmt.Fprintf(os.Stderr, "Warning: eBPF permissions failed: %v (continuing without eBPF)\n", err)
+		} else {
+			loader := ebpf.New()
+			defer loader.Close()
 
-		loader := ebpf.New()
-		defer loader.Close()
-
-		if err := setupEBPF(loader, bpfDir, proc); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to setup eBPF: %v\n", err)
+			if err := setupEBPF(loader, bpfDir, proc); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to setup eBPF: %v\n", err)
+			}
 		}
 	}
 

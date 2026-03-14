@@ -2,7 +2,9 @@ package hybrid
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -36,6 +38,7 @@ const (
 	IPCTypeThreadSample  uint8 = 3
 	IPCTypeException     uint8 = 4
 	IPCTypeHeartbeat     uint8 = 5
+	IPCTypeSymbolUpdate  uint8 = 6 // New: address -> name mapping
 	IPCTypeCmdSetFilter  uint8 = 10
 	IPCTypeCmdStartStack uint8 = 11
 	IPCTypeCmdStopStack  uint8 = 12
@@ -96,6 +99,10 @@ type Agent struct {
 	pythonTracer   *PythonTracer
 	ebpfEnabled    bool
 
+	// Symbol table: address -> method name (for IP-based symbolication)
+	symbolTable map[uint64]string
+	symbolMu    sync.RWMutex
+
 	// IPC Server
 	ipcServer     *IPCServer
 	ipcListener   net.Listener
@@ -145,6 +152,7 @@ type IPCServer struct {
 	wg         sync.WaitGroup
 	ctx        context.Context
 	cancel     context.CancelFunc
+	agent      *Agent // Reference to agent for symbol table
 }
 
 type SpanProcessor struct {
@@ -152,6 +160,7 @@ type SpanProcessor struct {
 	spans         map[string]*SpanWithStackData // traceID -> span
 	threadSamples map[string][]ThreadSampleData // traceID -> samples
 	exceptions    map[string]ExceptionData      // traceID -> exception
+	agent         *Agent                        // Reference to agent for symbol table
 }
 
 type ExceptionData struct {
@@ -160,11 +169,12 @@ type ExceptionData struct {
 	Timestamp uint64
 }
 
-func NewSpanProcessor() *SpanProcessor {
+func NewSpanProcessor(agent *Agent) *SpanProcessor {
 	return &SpanProcessor{
 		spans:         make(map[string]*SpanWithStackData),
 		threadSamples: make(map[string][]ThreadSampleData),
 		exceptions:    make(map[string]ExceptionData),
+		agent:         agent,
 	}
 }
 
@@ -224,7 +234,7 @@ func (sp *SpanProcessor) Clear(traceID string) {
 	delete(sp.threadSamples, traceID)
 }
 
-func NewIPCServer(socketPath string, debug bool) *IPCServer {
+func NewIPCServer(socketPath string, debug bool, agent *Agent) *IPCServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &IPCServer{
 		socketPath: socketPath,
@@ -232,6 +242,7 @@ func NewIPCServer(socketPath string, debug bool) *IPCServer {
 		spans:      make(chan *SpanWithStackData, 1000),
 		ctx:        ctx,
 		cancel:     cancel,
+		agent:      agent,
 	}
 }
 
@@ -302,6 +313,61 @@ func (a *Agent) UpdateSamplingConfig(slowThresholdMs int, captureStack bool, end
 	copy(payload[5:], endpointFilter)
 
 	return a.ipcServer.SendCommand(IPCTypeCmdSetFilter, payload)
+}
+
+func (a *Agent) AddSymbol(address uint64, name string) {
+	a.symbolMu.Lock()
+	defer a.symbolMu.Unlock()
+	a.symbolTable[address] = name
+	fmt.Printf("[AGENT] Symbol added: addr=%x, name=%s\n", address, name)
+}
+
+func (a *Agent) GetSymbol(address uint64) string {
+	a.symbolMu.RLock()
+	defer a.symbolMu.RUnlock()
+	return a.symbolTable[address]
+}
+
+func parseW3CTraceID(raw string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			return r
+		}
+		return -1
+	}, raw)
+
+	if len(cleaned) >= 34 && strings.HasPrefix(cleaned, "00") {
+		cleaned = cleaned[2:34]
+	}
+
+	if len(cleaned) > 32 {
+		cleaned = cleaned[:32]
+	}
+
+	if len(cleaned) < 32 {
+		cleaned = strings.Repeat("0", 32-len(cleaned)) + cleaned
+	}
+
+	return cleaned
+}
+
+func parseW3CSpanID(raw string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			return r
+		}
+		return -1
+	}, raw)
+
+	if len(cleaned) > 16 {
+		cleaned = cleaned[:16]
+	}
+
+	if len(cleaned) < 16 {
+		cleaned = strings.Repeat("0", 16-len(cleaned)) + cleaned
+	}
+
+	return cleaned
 }
 
 func (s *IPCServer) acceptLoop(spanProcessor *SpanProcessor) {
@@ -423,6 +489,18 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 			fmt.Printf("[IPC] Heartbeat received\n")
 		}
 
+	case IPCTypeSymbolUpdate:
+		// Symbol update: 8 bytes address + null-terminated name
+		if len(data) >= 9 && s.agent != nil {
+			address := binary.LittleEndian.Uint64(data[0:8])
+			name := string(data[8:])
+			if idx := strings.Index(name, "\x00"); idx > 0 {
+				name = name[:idx]
+			}
+			// Store in agent's symbol table via SpanProcessor
+			s.agent.AddSymbol(address, name)
+		}
+
 	case IPCTypeException:
 		if len(data) >= 424 { // traceId(32) + exceptionType(128) + message(256) + timestamp(8)
 			var exceptionData struct {
@@ -455,7 +533,7 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 
 func New(cfg *config.Config, exporter *otel.Exporter) *Agent {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Agent{
+	agent := &Agent{
 		config:   cfg,
 		exporter: exporter,
 		ctx:      ctx,
@@ -466,14 +544,17 @@ func New(cfg *config.Config, exporter *otel.Exporter) *Agent {
 		pythonTracer: &PythonTracer{
 			processes: make(map[int32]*PythonProcess),
 		},
-		spanProcessor: NewSpanProcessor(),
+		spanProcessor: NewSpanProcessor(nil), // Will be set below
+		symbolTable:   make(map[uint64]string),
 	}
+	agent.spanProcessor.agent = agent // Set back-reference
+	return agent
 }
 
 func (a *Agent) Start() error {
 	// Start IPC Server
 	if a.config.IPC.SocketPath != "" {
-		a.ipcServer = NewIPCServer(a.config.IPC.SocketPath, a.config.IPC.Debug)
+		a.ipcServer = NewIPCServer(a.config.IPC.SocketPath, a.config.IPC.Debug, a)
 		if err := a.ipcServer.Start(a.spanProcessor); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start IPC server: %v\n", err)
 			// Continue without IPC - not critical
@@ -550,27 +631,26 @@ func (a *Agent) flushSpanData() {
 	a.spanProcessor.mu.Lock()
 	defer a.spanProcessor.mu.Unlock()
 
-	// Process each span with its samples
+	if len(a.spanProcessor.spans) > 0 {
+		fmt.Printf("[DEBUG-FLUSH] Processing %d spans\n", len(a.spanProcessor.spans))
+	}
+
 	for traceID, span := range a.spanProcessor.spans {
-		// Create the main span with attributes
 		attrs := []attribute.KeyValue{
 			attribute.String("profiler.type", "dotnet"),
 			attribute.Int("process.pid", int(span.ThreadID)),
 			attribute.Int64("duration.ns", int64(span.EndTimeNS-span.StartTimeNS)),
 		}
 
-		// Add operation name (trim null bytes)
 		operationName := string(span.OperationName[:])
 		if idx := strings.Index(operationName, "\x00"); idx > 0 {
 			operationName = operationName[:idx]
 		}
 
-		// Add stack frame count as attribute
 		if span.StackFrameCount > 0 {
 			attrs = append(attrs, attribute.Int("stack.frame.count", int(span.StackFrameCount)))
 		}
 
-		// Get exception if any
 		if exc, ok := a.spanProcessor.exceptions[traceID]; ok {
 			attrs = append(attrs,
 				attribute.String("error", "true"),
@@ -579,38 +659,71 @@ func (a *Agent) flushSpanData() {
 			)
 		}
 
-		// Send main span
-		a.exporter.AddEvent(operationName, attrs)
+		traceIDRaw := strings.TrimRight(string(span.TraceID[:]), "\x00")
+		spanIDRaw := strings.TrimRight(string(span.SpanID[:]), "\x00")
+		parentIDRaw := strings.TrimRight(string(span.ParentSpanID[:]), "\x00")
 
-		// Create child spans for stack frames (Flamegraph visualization)
+		fmt.Printf("[DEBUG-OTLP] Raw IDs: TraceID='%s', SpanID='%s', ParentID='%s'\n",
+			traceIDRaw, spanIDRaw, parentIDRaw)
+
+		traceIDStr := parseW3CTraceID(traceIDRaw)
+		spanIDStr := parseW3CSpanID(spanIDRaw)
+		parentIDStr := parseW3CSpanID(parentIDRaw)
+
+		fmt.Printf("[DEBUG-OTLP] Parsed IDs: TraceID=%s (len=%d), SpanID=%s, ParentID=%s\n",
+			traceIDStr, len(traceIDStr), spanIDStr, parentIDStr)
+
+		var mainSpan otel.DirectSpan
+		mainSpan.Name = operationName
+		mainSpan.StartTime = time.Unix(0, int64(span.StartTimeNS))
+		mainSpan.EndTime = time.Unix(0, int64(span.EndTimeNS))
+		mainSpan.Attrs = attrs
+
+		if traceIDBytes, err := hex.DecodeString(traceIDStr); err == nil && len(traceIDBytes) == 16 {
+			copy(mainSpan.TraceID[:], traceIDBytes)
+		}
+		if spanIDBytes, err := hex.DecodeString(spanIDStr); err == nil && len(spanIDBytes) == 8 {
+			copy(mainSpan.SpanID[:], spanIDBytes)
+		}
+		if parentIDBytes, err := hex.DecodeString(parentIDStr); err == nil && len(parentIDBytes) == 8 {
+			copy(mainSpan.ParentID[:], parentIDBytes)
+		}
+
+		directSpans := []otel.DirectSpan{mainSpan}
+
 		if len(span.StackFrames) > 0 {
-			frameNames := []string{
-				"UserController.GetUser",
-				"UserService.ValidateToken",
-				"Database.Query",
-			}
-
 			for i, ip := range span.StackFrames {
-				frameName := "unknown"
-				if i < len(frameNames) {
-					frameName = frameNames[i]
-				} else {
+				frameName := a.GetSymbol(ip)
+				if frameName == "" {
 					frameName = fmt.Sprintf("frame_%d", i)
 				}
 
-				frameAttrs := []attribute.KeyValue{
-					attribute.String("frame.name", frameName),
-					attribute.Int64("frame.ip", int64(ip)),
-					attribute.Int("frame.depth", i),
-				}
+				var childSpanID [8]byte
+				rand.Read(childSpanID[:])
 
-				// Send child span
-				childName := "fn:" + frameName
-				a.exporter.AddEvent(childName, frameAttrs)
+				childSpan := otel.DirectSpan{
+					IPCSpanContext: otel.IPCSpanContext{
+						TraceID:  mainSpan.TraceID,
+						SpanID:   childSpanID,
+						ParentID: mainSpan.SpanID,
+					},
+					Name:      "fn:" + frameName,
+					StartTime: mainSpan.StartTime.Add(time.Duration(i) * time.Microsecond),
+					EndTime:   mainSpan.StartTime.Add(time.Duration(i+1) * time.Microsecond),
+					Attrs: []attribute.KeyValue{
+						attribute.String("frame.name", frameName),
+						attribute.Int64("frame.ip", int64(ip)),
+						attribute.Int("frame.depth", i),
+					},
+				}
+				directSpans = append(directSpans, childSpan)
 			}
 		}
 
-		// Clean up processed data
+		if err := a.exporter.ExportSpansDirect(directSpans); err != nil {
+			fmt.Printf("[DEBUG-OTLP] Export error: %v\n", err)
+		}
+
 		delete(a.spanProcessor.spans, traceID)
 		delete(a.spanProcessor.threadSamples, traceID)
 		delete(a.spanProcessor.exceptions, traceID)
