@@ -496,17 +496,16 @@ func (s *IPCServer) processMessage(msgType uint8, data []byte, spanProcessor *Sp
 
 	case IPCTypeSymbolUpdate:
 		// Symbol update: 8 bytes address + null-terminated name
+		fmt.Printf("[IPC-DEBUG] Received SymbolUpdate, len(data)=%d\n", len(data))
 		if len(data) >= 9 && s.agent != nil {
 			address := binary.LittleEndian.Uint64(data[0:8])
 			name := string(data[8:])
 			if idx := strings.Index(name, "\x00"); idx > 0 {
 				name = name[:idx]
 			}
+			fmt.Printf("[IPC-DEBUG] SymbolUpdate: addr=0x%x, name=%s\n", address, name)
 			// Store in agent's symbol table via SpanProcessor
 			s.agent.AddSymbol(address, name)
-			if s.debug {
-				fmt.Printf("[IPC] Symbol received: addr=0x%x, name=%s\n", address, name)
-			}
 		}
 
 	case IPCTypeException:
