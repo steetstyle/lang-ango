@@ -296,14 +296,15 @@ public class LangAngoStartupHook
                                         RuntimeMethodHandle handle = method.MethodHandle;
                                         methodAddr = handle.GetFunctionPointer();
                                         
+                                        Console.WriteLine($"[LangAngo-FP] Frame {i}: GetFunctionPointer returned 0x{methodAddr.ToInt64():X} for {method.Name}");
+                                        
                                         // Register symbol with caching
                                         methodName = RegisterMethodSymbol(methodAddr, method);
                                     }
                                     catch (Exception ex)
                                     {
                                         // Fallback to metadata token as pseudo-IP
-                                        // Note: GetFunctionPointer may fail for some dynamic methods
-                                        Console.Error.WriteLine($"[LangAngo-WARN] GetFunctionPointer failed: {method.Name} -> using metadata token, error: {ex.Message}");
+                                        Console.Error.WriteLine($"[LangAngo-FP-ERR] GetFunctionPointer failed for {method.Name}: {ex.Message}");
                                         methodAddr = (IntPtr)((ulong)method.MetadataToken);
                                         methodName = method.DeclaringType?.FullName != null 
                                             ? method.DeclaringType.FullName + "." + method.Name 
@@ -443,9 +444,13 @@ public class LangAngoStartupHook
     // Returns the method name (either cached or newly resolved)
     private static string RegisterMethodSymbol(IntPtr methodAddr, System.Reflection.MethodBase? method)
     {
+        // Debug: Always log when this is called
+        Console.WriteLine($"[LangAngo-REG] RegisterMethodSymbol called: addr=0x{methodAddr.ToInt64():X}");
+        
         // Check if we already have this symbol cached
         if (_symbolCache.TryGetValue(methodAddr, out string? cachedName))
         {
+            Console.WriteLine($"[LangAngo-REG] Cache hit for addr=0x{methodAddr.ToInt64():X}");
             return cachedName;
         }
         
@@ -470,12 +475,13 @@ public class LangAngoStartupHook
         // Send symbol update to Go agent (first time only)
         try
         {
+            Console.WriteLine($"[LangAngo-SYMBOL-PRE] About to send: addr=0x{methodAddr.ToInt64():X}, name={fullName}");
             langango_bridge_send_symbol((ulong)methodAddr.ToInt64(), fullName);
-            Console.WriteLine($"[LangAngo-SYMBOL] New symbol registered: addr={methodAddr:X}, name={fullName}");
+            Console.WriteLine($"[LangAngo-SYMBOL-POST] Sent successfully: addr=0x{methodAddr.ToInt64():X}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[LangAngo-SYMBOL] Failed to send: {ex.Message}");
+            Console.WriteLine($"[LangAngo-SYMBOL-ERROR] Failed to send: addr=0x{methodAddr.ToInt64():X}, error={ex.Message}");
         }
         
         return fullName;
